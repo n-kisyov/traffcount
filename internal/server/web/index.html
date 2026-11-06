@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TraffCount — Network Monitor</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">TraffCount</span>
+          <span class="brand-subtitle">Windows 11 Network Monitor</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-tab="realtime">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
+          </svg>
+          <span>Real-Time Monitor</span>
+        </button>
+
+        <button class="nav-item" data-tab="history">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          <span>Traffic History</span>
+        </button>
+
+        <button class="nav-item" data-tab="settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <span>Settings &amp; Service</span>
+        </button>
+      </nav>
+
+      <!-- Sidebar Adapter Selector (Task Manager style) -->
+      <div class="sidebar-section-label">NETWORK ADAPTERS</div>
+      <div id="adapterList" class="adapter-list">
+        <!-- Populated dynamically -->
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="ws-status" id="wsStatus">
+          <span class="status-dot online"></span>
+          <span id="wsStatusText">Live (1Hz)</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top Header Bar -->
+      <header class="top-bar">
+        <div class="top-bar-title">
+          <h1 id="viewTitle">Real-Time Bandwidth</h1>
+          <span id="viewSubtitle" class="subtitle-badge">All Network Interfaces</span>
+        </div>
+
+        <div class="top-bar-actions">
+          <!-- Stay on Top Pin Button -->
+          <button id="btnStayOnTop" class="action-pill" title="Keep TraffCount window always on top of other windows">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="17" x2="12" y2="22"></line>
+              <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
+            </svg>
+            <span>Stay on Top</span>
+          </button>
+
+          <!-- Quick Theme Toggle Button -->
+          <button id="btnQuickTheme" class="icon-btn" title="Switch Dark / Light Mode">
+            <svg id="iconMoon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- TAB 1: REAL-TIME TASK MANAGER VIEW -->
+      <section id="tab-realtime" class="tab-panel active">
+        <div class="kpi-grid">
+          <div class="kpi-card rx-card">
+            <div class="kpi-header">
+              <span class="kpi-dot rx"></span>
+              <span class="kpi-label">RECEIVE (INBOUND)</span>
+            </div>
+            <div class="kpi-value" id="rtRxSpeed">0 bps</div>
+            <div class="kpi-sub">
+              <span>Session In: <strong id="rtSessionRx">0 B</strong></span>
+              <span id="rtRxPps">0 pkt/s</span>
+            </div>
+          </div>
+
+          <div class="kpi-card tx-card">
+            <div class="kpi-header">
+              <span class="kpi-dot tx"></span>
+              <span class="kpi-label">SEND (OUTBOUND)</span>
+            </div>
+            <div class="kpi-value" id="rtTxSpeed">0 bps</div>
+            <div class="kpi-sub">
+              <span>Session Out: <strong id="rtSessionTx">0 B</strong></span>
+              <span id="rtTxPps">0 pkt/s</span>
+            </div>
+          </div>
+
+          <div class="kpi-card meta-card">
+            <div class="kpi-header">
+              <span class="kpi-label">ADAPTER DETAILS</span>
+            </div>
+            <div class="meta-rows">
+              <div class="meta-row"><span>Link Speed:</span> <strong id="rtLinkSpeed">—</strong></div>
+              <div class="meta-row"><span>IPv4 Address:</span> <strong id="rtIPv4">—</strong></div>
+              <div class="meta-row"><span>MAC Address:</span> <strong id="rtMAC">—</strong></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Task Manager Style 60s Graph Card -->
+        <div class="chart-card taskmgr-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-title">Throughput (Last 60 Seconds)</div>
+              <div class="chart-subtitle" id="rtAdapterDesc">Real-time 1-second resolution stream</div>
+            </div>
+            <div class="chart-scale-badge">
+              <span>Scale Ceiling:</span>
+              <strong id="rtScaleMax">100 Kbps</strong>
+            </div>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="realtimeCanvas"></canvas>
+          </div>
+          <div class="chart-axis-footer">
+            <span>60 seconds ago</span>
+            <div class="chart-legend">
+              <span class="legend-item"><i class="legend-swatch rx"></i> Receive (Inbound)</span>
+              <span class="legend-item"><i class="legend-swatch tx"></i> Send (Outbound)</span>
+            </div>
+            <span>0 (Now)</span>
+          </div>
+        </div>
+
+        <!-- Live All-Adapters Status Table -->
+        <div class="table-card">
+          <div class="table-card-header">
+            <h3>Active Network Interfaces</h3>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Adapter</th>
+                  <th>Hardware Description</th>
+                  <th>IPv4</th>
+                  <th class="num">Inbound Rate</th>
+                  <th class="num">Outbound Rate</th>
+                  <th class="num">Session Total</th>
+                </tr>
+              </thead>
+              <tbody id="liveTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: HISTORICAL TRAFFIC ANALYTICS -->
+      <section id="tab-history" class="tab-panel">
+        <div class="history-toolbar">
+          <div class="period-pills" id="periodPills">
+            <button class="pill-btn" data-period="today">Today</button>
+            <button class="pill-btn" data-period="24h">Last 24h</button>
+            <button class="pill-btn" data-days="7">Past 7 Days</button>
+            <button class="pill-btn active" data-days="14">Past 14 Days</button>
+            <button class="pill-btn" data-days="30">Past 30 Days</button>
+            <button class="pill-btn" data-days="90">Past 90 Days</button>
+            <button class="pill-btn" data-period="custom">Custom Range</button>
+          </div>
+
+          <div class="history-filters">
+            <div id="customDateBox" class="custom-date-box hidden">
+              <input type="date" id="inputStartDate" class="input-control" />
+              <span>to</span>
+              <input type="date" id="inputEndDate" class="input-control" />
+              <button id="btnApplyDates" class="btn-primary btn-sm">Apply</button>
+            </div>
+
+            <select id="historyIfaceSelect" class="select-control">
+              <option value="all">All Network Interfaces (Total)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="kpi-grid kpi-grid-4">
+          <div class="kpi-card">
+            <div class="kpi-header"><span class="kpi-dot rx"></span><span class="kpi-label">TOTAL INBOUND</span></div>
+            <div class="kpi-value" id="histTotalRx">0 B</div>
+            <div class="kpi-sub"><span id="histPeriodLabel">Past 14 Days</span></div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-header"><span class="kpi-dot tx"></span><span class="kpi-label">TOTAL OUTBOUND</span></div>
+            <div class="kpi-value" id="histTotalTx">0 B</div>
+            <div class="kpi-sub"><span>Uploaded data</span></div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-header"><span class="kpi-label">COMBINED TRAFFIC</span></div>
+            <div class="kpi-value" id="histCombined">0 B</div>
+            <div class="kpi-sub"><span>Inbound + Outbound</span></div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-header"><span class="kpi-label">DAILY AVERAGE</span></div>
+            <div class="kpi-value" id="histAvgDaily">0 B</div>
+            <div class="kpi-sub"><span>Per day in range</span></div>
+          </div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div>
+              <div class="chart-title">Traffic Volume Over Time</div>
+              <div class="chart-subtitle" id="histGranularityLabel">Daily breakdown of Inbound vs. Outbound bytes</div>
+            </div>
+            <div class="chart-legend">
+              <span class="legend-item"><i class="legend-swatch rx"></i> Inbound</span>
+              <span class="legend-item"><i class="legend-swatch tx"></i> Outbound</span>
+            </div>
+          </div>
+          <div class="canvas-wrap history-canvas-wrap">
+            <canvas id="historyCanvas"></canvas>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-card-header">
+            <h3>Traffic Breakdown by Network Interface</h3>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>NIC Name</th>
+                  <th>Adapter Description</th>
+                  <th>MAC</th>
+                  <th class="num">Inbound</th>
+                  <th class="num">Outbound</th>
+                  <th class="num">Total Traffic</th>
+                  <th style="width:160px">Share</th>
+                </tr>
+              </thead>
+              <tbody id="historyIfaceTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: SETTINGS & WINDOWS SERVICE -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="settings-grid">
+          <div class="settings-card">
+            <h3>Appearance &amp; Window Behavior</h3>
+            <p class="settings-desc">Customize how TraffCount looks and behaves on your Windows 11 desktop.</p>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Color Theme</div>
+                <div class="setting-hint">Switch between Windows 11 Dark Mode (default) and Light Mode.</div>
+              </div>
+              <div class="segmented-control" id="themeSelector">
+                <button class="seg-btn active" data-theme-val="dark">Dark Mode</button>
+                <button class="seg-btn" data-theme-val="light">Light Mode</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Stay on Top (Always on Top)</div>
+                <div class="setting-hint">Keep the TraffCount window pinned above other desktop windows.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkAlwaysOnTop" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Bandwidth Speed Units</div>
+                <div class="setting-hint">Display real-time throughput in bits/sec (Mbps) or bytes/sec (MB/s).</div>
+              </div>
+              <div class="segmented-control" id="unitSelector">
+                <button class="seg-btn active" data-unit-val="bits">Bits (Mbps / Kbps)</button>
+                <button class="seg-btn" data-unit-val="bytes">Bytes (MB/s / KB/s)</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Hide Software Loopback Adapters</div>
+                <div class="setting-hint">Filter out virtual loopback interfaces from live views.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkHideLoopback" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <h3>Windows Background Service</h3>
+            <p class="settings-desc">
+              Run TraffCount's collector as an automatic Windows Service (`TraffCountService`) so traffic is counted 24/7 even before login.
+            </p>
+
+            <div class="service-status-banner" id="serviceBanner">
+              <div>
+                <div class="setting-title">Service Status</div>
+                <div class="service-state-text" id="svcStateText">Checking...</div>
+              </div>
+              <span class="svc-badge" id="svcBadge">Checking</span>
+            </div>
+
+            <div class="service-actions">
+              <button id="btnSvcInstall" class="btn-primary">Install &amp; Start Service (Admin)</button>
+              <button id="btnSvcStart" class="btn-secondary">Start</button>
+              <button id="btnSvcStop" class="btn-secondary">Stop</button>
+              <button id="btnSvcUninstall" class="btn-danger">Uninstall Service</button>
+            </div>
+
+            <div class="settings-note">
+              <strong>CLI Tip:</strong> You can also manage the service from an elevated PowerShell prompt using:
+              <code>traffcount.exe service install</code> or <code>traffcount.exe service status</code>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
+
