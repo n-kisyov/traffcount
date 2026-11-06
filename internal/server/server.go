@@ -47,6 +47,7 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ping", s.handlePing)
 	mux.HandleFunc("/api/realtime", s.handleRealtime)
+	mux.HandleFunc("/api/connections", s.handleConnections)
 	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/settings", s.handleSettings)
@@ -94,6 +95,14 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.collector.LatestSnapshot())
+}
+
+func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filterIP := q.Get("ip")
+	includeUDP := q.Get("udp") == "1" || q.Get("udp") == "true"
+	snap := collector.GetActiveConnections(filterIP, includeUDP)
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {

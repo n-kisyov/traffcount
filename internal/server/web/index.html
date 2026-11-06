@@ -152,24 +152,76 @@
           </div>
         </div>
 
-        <!-- Live All-Adapters Status Table -->
-        <div class="table-card">
-          <div class="table-card-header">
-            <h3>Active Network Interfaces</h3>
+        <!-- Live Network Connections & Active Processes Inspector -->
+        <div class="table-card connections-card">
+          <div class="conn-header-bar">
+            <div class="conn-title-group">
+              <h3>Live Network Connections &amp; Processes</h3>
+              <div class="conn-summary-badges">
+                <span class="conn-stat-chip established" title="Active Established TCP Sessions">
+                  <i class="dot-sm"></i> <strong id="connCountEst">0</strong> Established
+                </span>
+                <span class="conn-stat-chip listen" title="Listening Server Ports">
+                  <strong id="connCountListen">0</strong> Listening
+                </span>
+                <span class="conn-stat-chip muted" title="Closing / Time-Wait Sockets">
+                  <strong id="connCountWait">0</strong> Time-Wait
+                </span>
+                <span class="conn-stat-chip muted" id="connCountUdpWrap" style="display:none">
+                  <strong id="connCountUdp">0</strong> UDP
+                </span>
+              </div>
+            </div>
+
+            <div class="conn-controls">
+              <div class="segmented-control" id="connSubTabSelector">
+                <button class="seg-btn active" data-subview="sockets">Sockets List</button>
+                <button class="seg-btn" data-subview="processes">By Process</button>
+              </div>
+
+              <div class="segmented-control" id="connStateFilter">
+                <button class="seg-btn active" data-state="ALL">All</button>
+                <button class="seg-btn" data-state="ESTABLISHED">Established</button>
+                <button class="seg-btn" data-state="LISTEN">Listening</button>
+              </div>
+
+              <label class="conn-chk-label" title="Include UDP endpoints">
+                <input type="checkbox" id="chkIncludeUDP" />
+                <span>+UDP</span>
+              </label>
+
+              <input type="text" id="connSearchInput" class="input-control conn-search" placeholder="Filter app, IP, port, PID..." />
+            </div>
           </div>
-          <div class="table-scroll">
-            <table class="data-table">
+
+          <div class="table-scroll conn-table-scroll">
+            <table class="data-table" id="connSocketsTable">
               <thead>
                 <tr>
-                  <th>Adapter</th>
-                  <th>Hardware Description</th>
-                  <th>IPv4</th>
-                  <th class="num">Inbound Rate</th>
-                  <th class="num">Outbound Rate</th>
-                  <th class="num">Session Total</th>
+                  <th>Process</th>
+                  <th>PID</th>
+                  <th>Proto</th>
+                  <th>Local Endpoint</th>
+                  <th>Remote Endpoint</th>
+                  <th>Service</th>
+                  <th>State</th>
                 </tr>
               </thead>
-              <tbody id="liveTableBody"></tbody>
+              <tbody id="connTableBody"></tbody>
+            </table>
+
+            <table class="data-table hidden" id="connProcessesTable">
+              <thead>
+                <tr>
+                  <th>Application / Process</th>
+                  <th>PID</th>
+                  <th class="num">Established</th>
+                  <th class="num">Listening Ports</th>
+                  <th class="num">Other / Wait</th>
+                  <th class="num">Total Sockets</th>
+                </tr>
+              </thead>
+              <tbody id="connProcTableBody"></tbody>
             </table>
           </div>
         </div>

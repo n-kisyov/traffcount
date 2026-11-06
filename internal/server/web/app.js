@@ -20,6 +20,13 @@
       iface: "all",
     },
     historyReport: null,
+    connectionsSnap: null,
+    connFilter: {
+      subview: "sockets", // "sockets" or "processes"
+      state: "ALL",       // "ALL", "ESTABLISHED", "LISTEN"
+      includeUDP: false,
+      search: "",
+    },
   };
 
   // DOM Elements
@@ -44,8 +51,22 @@
   const rtMACEl = document.getElementById("rtMAC");
   const rtAdapterDescEl = document.getElementById("rtAdapterDesc");
   const rtScaleMaxEl = document.getElementById("rtScaleMax");
-  const liveTableBody = document.getElementById("liveTableBody");
   const rtCanvas = document.getElementById("realtimeCanvas");
+
+  // Connections Inspector DOM
+  const connCountEstEl = document.getElementById("connCountEst");
+  const connCountListenEl = document.getElementById("connCountListen");
+  const connCountWaitEl = document.getElementById("connCountWait");
+  const connCountUdpWrapEl = document.getElementById("connCountUdpWrap");
+  const connCountUdpEl = document.getElementById("connCountUdp");
+  const connSubTabBtns = document.querySelectorAll("#connSubTabSelector .seg-btn");
+  const connStateBtns = document.querySelectorAll("#connStateFilter .seg-btn");
+  const chkIncludeUDP = document.getElementById("chkIncludeUDP");
+  const connSearchInput = document.getElementById("connSearchInput");
+  const connSocketsTable = document.getElementById("connSocketsTable");
+  const connProcessesTable = document.getElementById("connProcessesTable");
+  const connTableBody = document.getElementById("connTableBody");
+  const connProcTableBody = document.getElementById("connProcTableBody");
 
   // History DOM
   const periodPills = document.querySelectorAll("#periodPills .pill-btn");
@@ -266,6 +287,7 @@
           fetchHistoryReport();
         } else {
           renderRealtimeView();
+          fetchConnections();
         }
         renderSidebarAdapters(state.latestRealtime);
       });
@@ -330,30 +352,224 @@
 
       drawTaskManagerGraph(hist);
     }
+  }
 
-    // Populate Live Adapters Table
-    liveTableBody.innerHTML = ifaces
-      .map(
-        (nic) => `
-      <tr style="cursor:pointer" data-row-iface="${escapeHtml(nic.id)}">
-        <td><strong>${escapeHtml(nic.name)}</strong></td>
-        <td>${escapeHtml(nic.description || "—")}</td>
-        <td><code>${escapeHtml(nic.ipv4 || "—")}</code></td>
-        <td class="num" style="color:var(--rx-color)">${formatRate(nic.currentRxBps)}</td>
-        <td class="num" style="color:var(--tx-color)">${formatRate(nic.currentTxBps)}</td>
-        <td class="num">${formatBytes((nic.sessionRx || 0) + (nic.sessionTx || 0))}</td>
-      </tr>
-    `
-      )
-      .join("");
+  // Known Port / Service Resolver
+  const KNOWN_PORTS = {
+    20: "FTP-Data",
+    21: "FTP",
+    22: "SSH",
+    23: "Telnet",
+    25: "SMTP",
+    53: "DNS",
+    67: "DHCP",
+    68: "DHCP",
+    80: "HTTP",
+    110: "POP3",
+    123: "NTP",
+    135: "RPC",
+    137: "NetBIOS",
+    138: "NetBIOS",
+    139: "NetBIOS",
+    143: "IMAP",
+    443: "HTTPS",
+    445: "SMB",
+    465: "SMTPS",
+    587: "SMTP",
+    993: "IMAPS",
+    995: "POP3S",
+    1433: "MSSQL",
+    1521: "Oracle",
+    3306: "MySQL",
+    3389: "RDP",
+    5353: "mDNS",
+    5432: "PostgreSQL",
+    5672: "AMQP",
+    6379: "Redis",
+    8000: "HTTP-Alt",
+    8080: "HTTP-Proxy",
+    8443: "HTTPS-Alt",
+    9876: "TraffCount",
+    27017: "MongoDB",
+  };
 
-    liveTableBody.querySelectorAll("tr").forEach((tr) => {
-      tr.addEventListener("click", () => {
-        state.selectedIface = tr.dataset.rowIface;
-        renderSidebarAdapters(state.latestRealtime);
-        renderRealtimeView();
-      });
+  function resolvePortService(localPort, remotePort, stateStr) {
+    if (stateStr === "LISTEN" && KNOWN_PORTS[localPort]) {
+      return KNOWN_PORTS[localPort];
+    }
+    if (remotePort && KNOWN_PORTS[remotePort]) {
+      return KNOWN_PORTS[remotePort];
+    }
+    if (localPort && KNOWN_PORTS[localPort]) {
+      return KNOWN_PORTS[localPort];
+    }
+    return "—";
+  }
+
+  // Live TCP/UDP Connections & Processes Inspector
+  connSubTabBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.connFilter.subview = btn.dataset.subview;
+      connSubTabBtns.forEach((b) => b.classList.toggle("active", b === btn));
+      const isProc = state.connFilter.subview === "processes";
+      connSocketsTable.classList.toggle("hidden", isProc);
+      connProcessesTable.classList.toggle("hidden", !isProc);
+      renderConnectionsTable();
     });
+  });
+
+  connStateBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.connFilter.state = btn.dataset.state;
+      connStateBtns.forEach((b) => b.classList.toggle("active", b === btn));
+      renderConnectionsTable();
+    });
+  });
+
+  chkIncludeUDP.addEventListener("change", () => {
+    state.connFilter.includeUDP = chkIncludeUDP.checked;
+    connCountUdpWrapEl.style.display = chkIncludeUDP.checked ? "inline-flex" : "none";
+    fetchConnections();
+  });
+
+  connSearchInput.addEventListener("input", () => {
+    state.connFilter.search = connSearchInput.value.trim().toLowerCase();
+    renderConnectionsTable();
+  });
+
+  async function fetchConnections() {
+    if (state.activeTab !== "realtime") return;
+
+    const params = new URLSearchParams();
+    if (state.connFilter.includeUDP) {
+      params.set("udp", "1");
+    }
+    if (state.selectedIface !== "all" && state.latestRealtime) {
+      const sel = (state.latestRealtime.interfaces || []).find((i) => i.id === state.selectedIface);
+      if (sel && sel.ipv4) {
+        params.set("ip", sel.ipv4);
+      }
+    }
+
+    try {
+      const res = await fetch(`/api/connections?${params.toString()}`);
+      if (!res.ok) return;
+      state.connectionsSnap = await res.json();
+      renderConnectionsTable();
+    } catch (e) {
+      console.error("Failed to fetch connections:", e);
+    }
+  }
+
+  function renderConnectionsTable() {
+    const snap = state.connectionsSnap;
+    if (!snap) return;
+
+    connCountEstEl.textContent = snap.establishedCount || 0;
+    connCountListenEl.textContent = snap.listenCount || 0;
+    connCountWaitEl.textContent = snap.timeWaitCount || 0;
+    connCountUdpEl.textContent = snap.totalUdp || 0;
+
+    const q = state.connFilter.search;
+
+    if (state.connFilter.subview === "processes") {
+      let procs = snap.topProcesses || [];
+      if (q) {
+        procs = procs.filter(
+          (p) =>
+            p.processName.toLowerCase().includes(q) ||
+            String(p.pid).includes(q)
+        );
+      }
+      if (procs.length === 0) {
+        connProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">No matching processes with active sockets.</td></tr>`;
+        return;
+      }
+      connProcTableBody.innerHTML = procs
+        .map((p) => {
+          const initial = (p.processName || "?").charAt(0).toUpperCase();
+          return `
+          <tr style="cursor:pointer" data-proc-filter="${escapeHtml(p.processName)}">
+            <td>
+              <div class="proc-cell">
+                <span class="proc-badge">${escapeHtml(initial)}</span>
+                <span>${escapeHtml(p.processName)}</span>
+              </div>
+            </td>
+            <td><code>${p.pid}</code></td>
+            <td class="num" style="color:var(--success);font-weight:600">${p.established}</td>
+            <td class="num" style="color:var(--accent-primary)">${p.listening}</td>
+            <td class="num">${p.other}</td>
+            <td class="num"><strong>${p.total}</strong></td>
+          </tr>
+        `;
+        })
+        .join("");
+
+      connProcTableBody.querySelectorAll("tr[data-proc-filter]").forEach((tr) => {
+        tr.addEventListener("click", () => {
+          const procName = tr.dataset.procFilter;
+          connSearchInput.value = procName;
+          state.connFilter.search = procName.toLowerCase();
+          state.connFilter.subview = "sockets";
+          connSubTabBtns.forEach((b) => b.classList.toggle("active", b.dataset.subview === "sockets"));
+          connSocketsTable.classList.remove("hidden");
+          connProcessesTable.classList.add("hidden");
+          renderConnectionsTable();
+        });
+      });
+      return;
+    }
+
+    // Sockets List View
+    let list = snap.connections || [];
+    if (state.connFilter.state !== "ALL") {
+      list = list.filter((c) => c.state === state.connFilter.state);
+    }
+    if (q) {
+      list = list.filter(
+        (c) =>
+          (c.processName && c.processName.toLowerCase().includes(q)) ||
+          (c.localAddr && c.localAddr.toLowerCase().includes(q)) ||
+          (c.remoteAddr && c.remoteAddr.toLowerCase().includes(q)) ||
+          (c.state && c.state.toLowerCase().includes(q)) ||
+          String(c.pid).includes(q)
+      );
+    }
+
+    const displayList = list.slice(0, 250);
+    if (displayList.length === 0) {
+      connTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:18px;">No matching network connections.</td></tr>`;
+      return;
+    }
+
+    connTableBody.innerHTML = displayList
+      .map((c) => {
+        const initial = (c.processName || "?").charAt(0).toUpperCase();
+        const svc = resolvePortService(c.localPort, c.remotePort, c.state);
+        let badgeCls = "";
+        if (c.state === "ESTABLISHED") badgeCls = "est";
+        else if (c.state === "LISTEN") badgeCls = "listen";
+        else if (c.state === "TIME_WAIT" || c.state === "CLOSE_WAIT") badgeCls = "wait";
+
+        return `
+        <tr>
+          <td>
+            <div class="proc-cell">
+              <span class="proc-badge">${escapeHtml(initial)}</span>
+              <span>${escapeHtml(c.processName)}</span>
+            </div>
+          </td>
+          <td><code>${c.pid}</code></td>
+          <td><code>${escapeHtml(c.protocol)}</code></td>
+          <td><code>${escapeHtml(c.localAddr)}</code></td>
+          <td><code>${escapeHtml(c.remoteAddr)}</code></td>
+          <td><span class="svc-tag">${escapeHtml(svc)}</span></td>
+          <td><span class="state-badge ${badgeCls}">${escapeHtml(c.state)}</span></td>
+        </tr>
+      `;
+      })
+      .join("");
   }
 
   function niceCeiling(maxBytesPerSec) {
@@ -783,6 +999,8 @@
   loadSettings().then(() => {
     connectWebSocket();
     fetchServiceStatus();
+    fetchConnections();
+    setInterval(fetchConnections, 2500);
   });
 })();
 

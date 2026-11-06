@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
@@ -145,6 +146,9 @@ func InstallAndStart() error {
 	}
 	defer m.Disconnect()
 
+	// Ensure any non-elevated standalone TraffCount instance releases port 9876 before the service starts
+	_ = requestGracefulShutdown()
+
 	s, err := m.OpenService(ServiceName)
 	if err == nil {
 		// Already installed; make sure it's started
@@ -188,6 +192,9 @@ func StopAndUninstall() error {
 	}
 	defer m.Disconnect()
 
+	// Ensure any non-elevated standalone TraffCount instance releases port 9876 before the service starts
+	_ = requestGracefulShutdown()
+
 	s, err := m.OpenService(ServiceName)
 	if err != nil {
 		return fmt.Errorf("service %s is not installed", ServiceName)
@@ -218,6 +225,7 @@ func StartService() error {
 	if !IsAdmin() {
 		return RunElevated("service", "start")
 	}
+	_ = requestGracefulShutdown()
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
@@ -249,4 +257,20 @@ func StopService() error {
 	_, err = s.Control(svc.Stop)
 	return err
 }
+
+func requestGracefulShutdown() error {
+	// Ask any running TraffCount tray/standalone window to close so the service can bind port 9876 cleanly
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	procFindWindowW := user32.NewProc("FindWindowW")
+	procPostMessageW := user32.NewProc("PostMessageW")
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		const WM_CLOSE = 0x0010
+		procPostMessageW.Call(hwnd, WM_CLOSE, 0, 0)
+		time.Sleep(400 * time.Millisecond)
+	}
+	return nil
+}
+
 

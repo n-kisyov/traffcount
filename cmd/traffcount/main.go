@@ -32,10 +32,16 @@ func main() {
 		return
 	}
 
-	// 2. Check CLI subcommands (`traffcount service install|uninstall|start|stop|status|run`)
-	if len(os.Args) > 1 && os.Args[1] == "service" {
-		handleServiceCLI(os.Args[2:])
-		return
+	// 2. Check CLI subcommands (`traffcount service install|uninstall|start|stop|status|run` or `traffcount quit`)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "service":
+			handleServiceCLI(os.Args[2:])
+			return
+		case "quit", "stop":
+			tray.ShutdownExistingTrayInstance()
+			return
+		}
 	}
 
 	// 3. Parse standard flags for interactive / tray execution

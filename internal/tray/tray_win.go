@@ -32,6 +32,7 @@ const (
 	WM_USER          = 0x0400
 	WM_TRAYICON      = WM_USER + 20
 	WM_SHOWDASHBOARD = WM_USER + 21
+	WM_QUIT_APP      = WM_USER + 22
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
@@ -187,6 +188,17 @@ func SignalExistingTrayInstance() bool {
 	return false
 }
 
+// ShutdownExistingTrayInstance asks an already-running TraffCount tray instance to exit cleanly.
+func ShutdownExistingTrayInstance() bool {
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, WM_QUIT_APP, 0, 0)
+		return true
+	}
+	return false
+}
+
 // Run blocks on the native Win32 message loop for the system tray icon.
 func (c *Controller) Run(ctx context.Context) {
 	runtime.LockOSThread()
@@ -293,7 +305,7 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 
-	case WM_CLOSE:
+	case WM_CLOSE, WM_QUIT_APP:
 		procDestroyWindow.Call(hwnd)
 		return 0
 
