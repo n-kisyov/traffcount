@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"traffcount/internal/collector"
 	"traffcount/internal/server"
 	"traffcount/internal/service"
@@ -57,7 +58,20 @@ func main() {
 		return
 	}
 
-	// Check if a TraffCount collector/server is already listening on dashboardURL (e.g. Windows Service or another instance)
+	// Enforce single interactive tray/GUI instance (separate from Windows Service in Session 0).
+	mutexHandle, alreadyExists := acquireSingleInstanceMutex()
+	if alreadyExists {
+		// Another desktop instance is already running: ask it to open/focus the dashboard window and exit immediately.
+		if !*trayOnly {
+			if !tray.SignalExistingTrayInstance() {
+				winui.NewManager(dashboardURL, false).OpenDashboard()
+			}
+		}
+		return
+	}
+	defer windows.CloseHandle(mutexHandle)
+
+	// Check if the TraffCount Windows Service is already listening on dashboardURL
 	alreadyRunning := isServerAlive(dashboardURL)
 
 	// Load initial settings to know AlwaysOnTop state
@@ -199,5 +213,18 @@ func attachParentConsole() {
 		}
 	}
 }
+
+func acquireSingleInstanceMutex() (windows.Handle, bool) {
+	namePtr, _ := syscall.UTF16PtrFromString("Local\\TraffCount_Desktop_SingleInstance_Mutex")
+	h, err := windows.CreateMutex(nil, false, namePtr)
+	if err == windows.ERROR_ALREADY_EXISTS {
+		if h != 0 {
+			windows.CloseHandle(h)
+		}
+		return 0, true
+	}
+	return h, false
+}
+
 
 
