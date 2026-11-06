@@ -14,6 +14,7 @@ import (
 	"traffcount/internal/collector"
 	"traffcount/internal/service"
 	"traffcount/internal/storage"
+	"traffcount/internal/tray"
 	"traffcount/internal/winui"
 )
 
@@ -56,7 +57,11 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/ws", s.handleWS)
 
 	webRoot, _ := fs.Sub(embeddedWeb, "web")
-	mux.Handle("/", http.FileServer(http.FS(webRoot)))
+	fileSrv := http.FileServer(http.FS(webRoot))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		fileSrv.ServeHTTP(w, r)
+	})
 
 	s.httpSrv = &http.Server{
 		Addr:              addr,
@@ -191,6 +196,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if s.winMgr != nil {
 			s.winMgr.SetAlwaysOnTop(cfg.AlwaysOnTop)
 		}
+		tray.NotifyTrayTopmost(cfg.AlwaysOnTop)
 		if s.onTopChanged != nil {
 			s.onTopChanged(cfg.AlwaysOnTop)
 		}
@@ -221,6 +227,9 @@ func (s *Server) handleWindowTopmost(w http.ResponseWriter, r *http.Request) {
 	applied := false
 	if s.winMgr != nil {
 		applied = s.winMgr.SetAlwaysOnTop(req.AlwaysOnTop)
+	}
+	if tray.NotifyTrayTopmost(req.AlwaysOnTop) {
+		applied = true
 	}
 	if s.onTopChanged != nil {
 		s.onTopChanged(req.AlwaysOnTop)
@@ -254,6 +263,10 @@ func (s *Server) handleService(w http.ResponseWriter, r *http.Request) {
 			err = service.StartService()
 		case "stop":
 			err = service.StopService()
+		case "restart":
+			_ = service.StopService()
+			time.Sleep(800 * time.Millisecond)
+			err = service.StartService()
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown action"})
 			return

@@ -107,7 +107,30 @@ func QueryStatus() StatusInfo {
 	return info
 }
 
-// RunElevated executes the current binary with UAC Administrator elevation ("runas") for the given subcommand.
+var (
+	shell32             = windows.NewLazySystemDLL("shell32.dll")
+	procShellExecuteExW = shell32.NewProc("ShellExecuteExW")
+)
+
+type shellExecuteInfoW struct {
+	CbSize       uint32
+	FMask        uint32
+	Hwnd         uintptr
+	LpVerb       *uint16
+	LpFile       *uint16
+	LpParameters *uint16
+	LpDirectory  *uint16
+	NShow        int32
+	HInstApp     uintptr
+	LpIDList     uintptr
+	LpClass      *uint16
+	HkeyClass    uintptr
+	DwHotKey     uint32
+	HIcon        uintptr
+	HProcess     windows.Handle
+}
+
+// RunElevated executes the current binary with UAC Administrator elevation ("runas") and waits for it to finish.
 func RunElevated(args ...string) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -122,7 +145,27 @@ func RunElevated(args ...string) error {
 	cwd, _ := os.Getwd()
 	cwdPtr, _ := syscall.UTF16PtrFromString(cwd)
 
-	return windows.ShellExecute(0, verbPtr, exePtr, argPtr, cwdPtr, windows.SW_NORMAL)
+	const SEE_MASK_NOCLOSEPROCESS = 0x00000040
+	sei := shellExecuteInfoW{
+		CbSize:       uint32(unsafe.Sizeof(shellExecuteInfoW{})),
+		FMask:        SEE_MASK_NOCLOSEPROCESS,
+		LpVerb:       verbPtr,
+		LpFile:       exePtr,
+		LpParameters: argPtr,
+		LpDirectory:  cwdPtr,
+		NShow:        windows.SW_HIDE,
+	}
+
+	ret, _, callErr := procShellExecuteExW.Call(uintptr(unsafe.Pointer(&sei)))
+	if ret == 0 {
+		return fmt.Errorf("ShellExecuteExW failed: %w", callErr)
+	}
+	if sei.HProcess != 0 {
+		defer windows.CloseHandle(sei.HProcess)
+		// Wait briefly (up to 3s) for non-interactive completion
+		_, _ = windows.WaitForSingleObject(sei.HProcess, 3000)
+	}
+	return nil
 }
 
 // InstallAndStart installs TraffCountService and starts it (requires Administrator privileges).
@@ -239,7 +282,7 @@ func StartService() error {
 	return s.Start()
 }
 
-// StopService stops a running TraffCountService.
+// StopService stops a running TraffCountService and waits until it reaches Stopped state.
 func StopService() error {
 	if !IsAdmin() {
 		return RunElevated("service", "stop")
@@ -254,8 +297,19 @@ func StopService() error {
 		return err
 	}
 	defer s.Close()
-	_, err = s.Control(svc.Stop)
-	return err
+	status, err := s.Control(svc.Stop)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for status.State != svc.Stopped && time.Now().Before(deadline) {
+		time.Sleep(250 * time.Millisecond)
+		status, err = s.Query()
+		if err != nil {
+			break
+		}
+	}
+	return nil
 }
 
 func requestGracefulShutdown() error {

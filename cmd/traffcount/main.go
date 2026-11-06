@@ -101,15 +101,27 @@ func main() {
 		},
 	})
 
-	// If the background service is not already serving the API, run the collector & HTTP server in-process!
+	// If the background service is not already serving the API, run the collector & HTTP server in-process.
+	// Also monitor inside a loop so if the Windows Service is stopped later while the tray is open,
+	// the tray process automatically starts the in-process collector & HTTP server as a seamless fallback!
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if !isServerAlive(dashboardURL) {
+				_ = runDaemon(ctx, *addr, winMgr, func(topmost bool) {
+					if trayCtrl != nil {
+						trayCtrl.SyncStayOnTop(topmost)
+					}
+				})
+			}
+			time.Sleep(1500 * time.Millisecond)
+		}
+	}()
 	if !alreadyRunning {
-		go func() {
-			_ = runDaemon(ctx, *addr, winMgr, func(topmost bool) {
-				if trayCtrl != nil {
-					trayCtrl.SyncStayOnTop(topmost)
-				}
-			})
-		}()
 		// Wait briefly for in-process HTTP server to come up before opening UI
 		waitForServer(dashboardURL, 2*time.Second)
 	}

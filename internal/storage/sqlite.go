@@ -70,11 +70,10 @@ func DefaultDBPath() string {
 	if progData != "" {
 		dir := filepath.Join(progData, "TraffCount")
 		if err := os.MkdirAll(dir, 0777); err == nil {
-			testFile := filepath.Join(dir, ".write_test")
-			if f, err := os.OpenFile(testFile, os.O_CREATE|os.O_WRONLY, 0666); err == nil {
+			dbFile := filepath.Join(dir, "traffcount.db")
+			if f, err := os.OpenFile(dbFile, os.O_CREATE|os.O_RDWR, 0666); err == nil {
 				f.Close()
-				os.Remove(testFile)
-				return filepath.Join(dir, "traffcount.db")
+				return dbFile
 			}
 		}
 	}

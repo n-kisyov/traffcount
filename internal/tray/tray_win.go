@@ -33,6 +33,7 @@ const (
 	WM_TRAYICON      = WM_USER + 20
 	WM_SHOWDASHBOARD = WM_USER + 21
 	WM_QUIT_APP      = WM_USER + 22
+	WM_SET_TOPMOST   = WM_USER + 23
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
@@ -172,9 +173,28 @@ func NewController(opts Options) *Controller {
 	return c
 }
 
-// SyncStayOnTop updates the tray checkmark when Stay on Top is toggled from the web UI.
+// SyncStayOnTop updates the tray checkmark and applies the topmost style in the interactive user session.
 func (c *Controller) SyncStayOnTop(topmost bool) {
 	c.stayOnTop = topmost
+	if c.opts.WinMgr != nil {
+		c.opts.WinMgr.SetAlwaysOnTop(topmost)
+	}
+}
+
+// NotifyTrayTopmost sends a Win32 message to any running TraffCount tray window in the interactive session
+// to immediately apply HWND_TOPMOST / HWND_NOTOPMOST.
+func NotifyTrayTopmost(topmost bool) bool {
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		var wp uintptr
+		if topmost {
+			wp = 1
+		}
+		procPostMessageW.Call(hwnd, WM_SET_TOPMOST, wp, 0)
+		return true
+	}
+	return false
 }
 
 // SignalExistingTrayInstance finds an already-running TraffCount tray hidden window and tells it to open/focus the dashboard.
@@ -280,7 +300,7 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case WM_TRAYICON:
 		low := uint32(lParam & 0xFFFF)
 		switch low {
-		case WM_LBUTTONDBLCLK, WM_LBUTTONUP:
+		case WM_LBUTTONUP:
 			if c != nil && c.opts.WinMgr != nil {
 				go c.opts.WinMgr.OpenDashboard()
 			}
@@ -302,6 +322,16 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case WM_SHOWDASHBOARD:
 		if c != nil && c.opts.WinMgr != nil {
 			go c.opts.WinMgr.OpenDashboard()
+		}
+		return 0
+
+	case WM_SET_TOPMOST:
+		top := wParam != 0
+		if c != nil {
+			c.stayOnTop = top
+			if c.opts.WinMgr != nil {
+				c.opts.WinMgr.SetAlwaysOnTop(top)
+			}
 		}
 		return 0
 
@@ -445,6 +475,28 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 		case <-ticker.C:
 			st := service.QueryStatus()
 			c.svcState = st.StateText
+
+			// Sync settings (including AlwaysOnTop toggled from the Web UI when served by Windows Service)
+			// and continuously enforce HWND_TOPMOST on the interactive desktop window.
+			sResp, sErr := client.Get(c.opts.DashboardURL + "/api/settings")
+			if sErr == nil && sResp.StatusCode == http.StatusOK {
+				var cfg struct {
+					AlwaysOnTop bool `json:"alwaysOnTop"`
+				}
+				if json.NewDecoder(sResp.Body).Decode(&cfg) == nil {
+					if c.stayOnTop != cfg.AlwaysOnTop {
+						c.stayOnTop = cfg.AlwaysOnTop
+						if c.opts.WinMgr != nil {
+							c.opts.WinMgr.SetAlwaysOnTop(cfg.AlwaysOnTop)
+						}
+					} else if c.opts.WinMgr != nil {
+						c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
+					}
+				}
+				sResp.Body.Close()
+			} else if c.opts.WinMgr != nil {
+				c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
+			}
 
 			resp, err := client.Get(c.opts.DashboardURL + "/api/realtime")
 			if err == nil && resp.StatusCode == http.StatusOK {

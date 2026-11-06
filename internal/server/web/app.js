@@ -1001,6 +1001,20 @@
     fetchServiceStatus();
     fetchConnections();
     setInterval(fetchConnections, 2500);
+    // Periodically sync settings in case Stay on Top was toggled from the System Tray menu
+    setInterval(async () => {
+      try {
+        const res = await fetch("/api/settings");
+        if (res.ok) {
+          const cfg = await res.json();
+          if (cfg.alwaysOnTop !== state.settings.alwaysOnTop) {
+            state.settings.alwaysOnTop = cfg.alwaysOnTop;
+            chkAlwaysOnTop.checked = !!cfg.alwaysOnTop;
+            btnStayOnTop.classList.toggle("pinned", !!cfg.alwaysOnTop);
+          }
+        }
+      } catch (_) {}
+    }, 2000);
   });
 })();
 
