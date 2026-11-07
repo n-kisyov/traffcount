@@ -40,6 +40,7 @@ const (
 	SWP_NOACTIVATE   = 0x0010
 	SWP_FRAMECHANGED = 0x0020
 	SWP_SHOWWINDOW   = 0x0040
+	SW_HIDE          = 0
 	SW_MAXIMIZE      = 3
 	SW_SHOW          = 5
 	SW_RESTORE       = 9
@@ -49,6 +50,16 @@ const (
 	GWL_EXSTYLE      = -20
 	WS_EX_TOPMOST    = 0x00000008
 )
+
+var enumMu sync.Mutex
+var enumCb uintptr
+
+func getEnumCallback(fn func(hwnd uintptr)) uintptr {
+	return syscall.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
+		fn(hwnd)
+		return 1
+	})
+}
 
 type winRect struct {
 	Left   int32
@@ -149,13 +160,31 @@ func (m *Manager) SetAlwaysOnTop(topmost bool) bool {
 	return ApplyTopmostToAllWindows(topmost)
 }
 
+// InterceptMinimizeToTray checks if any TraffCount window has been minimized (IsIconic)
+// and immediately hides it from the taskbar (SW_HIDE) so minimizing sends it to the System Tray only.
+func (m *Manager) InterceptMinimizeToTray() bool {
+	hwlist := FindAllTraffCountWindows(false)
+	hidAny := false
+	for _, hwnd := range hwlist {
+		iconic, _, _ := procIsIconic.Call(hwnd)
+		if iconic != 0 {
+			vis, _, _ := procIsWindowVisible.Call(hwnd)
+			if vis != 0 {
+				procShowWindow.Call(hwnd, SW_HIDE)
+				hidAny = true
+			}
+		}
+	}
+	return hidAny
+}
+
 // EnforceAlwaysOnTop checks open TraffCount windows and ensures their WS_EX_TOPMOST style matches topmost.
 func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 	m.mu.Lock()
 	m.alwaysOnTop = topmost
 	m.mu.Unlock()
 
-	hwlist := FindAllTraffCountWindows()
+	hwlist := FindAllTraffCountWindows(true)
 	for _, hwnd := range hwlist {
 		isTop := isWindowTopmost(hwnd)
 		if isTop != topmost {
@@ -164,15 +193,15 @@ func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 	}
 }
 
-// OpenDashboard brings an existing TraffCount window to the foreground, or launches a new native-like app window.
+// OpenDashboard brings an existing TraffCount window to the foreground (even if hidden in tray), or launches a new native-like app window.
 func (m *Manager) OpenDashboard() error {
 	m.mu.Lock()
 	topmost := m.alwaysOnTop
 	url := m.url
 	bounds := m.bounds
-	if hwnd := FindTraffCountWindow(); hwnd != 0 {
+	if hwnd := FindAnyTraffCountWindow(); hwnd != 0 {
 		m.mu.Unlock()
-		focusExistingWindow(hwnd, topmost)
+		focusExistingWindow(hwnd, topmost, bounds)
 		return nil
 	}
 	if m.launching {
@@ -261,12 +290,17 @@ func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
 	}
 }
 
-func focusExistingWindow(hwnd uintptr, topmost bool) {
+func focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds) {
+	vis, _, _ := procIsWindowVisible.Call(hwnd)
 	iconic, _, _ := procIsIconic.Call(hwnd)
+	if vis == 0 {
+		procShowWindow.Call(hwnd, SW_SHOW)
+	}
 	if iconic != 0 {
 		procShowWindow.Call(hwnd, SW_RESTORE)
-	} else {
-		procShowWindow.Call(hwnd, SW_SHOW)
+	}
+	if bounds.HasValue {
+		applyWindowBounds(hwnd, bounds)
 	}
 	procSetForeground.Call(hwnd)
 	applyTopmost(hwnd, topmost)
@@ -274,38 +308,59 @@ func focusExistingWindow(hwnd uintptr, topmost bool) {
 
 // FindTraffCountWindow searches top-level visible windows for one whose title contains WindowTitlePrefix.
 func FindTraffCountWindow() uintptr {
-	all := FindAllTraffCountWindows()
+	all := FindAllTraffCountWindows(true)
 	if len(all) > 0 {
 		return all[0]
 	}
 	return 0
 }
 
-// FindAllTraffCountWindows returns all visible top-level HWNDs matching WindowTitlePrefix.
-func FindAllTraffCountWindows() []uintptr {
-	var found []uintptr
-	cb := syscall.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		vis, _, _ := procIsWindowVisible.Call(hwnd)
-		if vis == 0 {
-			return 1 // continue
+// FindAnyTraffCountWindow searches top-level windows (both visible and SW_HIDE hidden) for WindowTitlePrefix.
+func FindAnyTraffCountWindow() uintptr {
+	all := FindAllTraffCountWindows(false)
+	if len(all) > 0 {
+		return all[0]
+	}
+	return 0
+}
+
+var (
+	enumTargetVisibleOnly bool
+	enumFoundList         []uintptr
+	sharedEnumCallback    = syscall.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
+		if enumTargetVisibleOnly {
+			vis, _, _ := procIsWindowVisible.Call(hwnd)
+			if vis == 0 {
+				return 1
+			}
 		}
 		buf := make([]uint16, 256)
 		ret, _, _ := procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 		if ret > 0 {
 			title := windows.UTF16ToString(buf[:ret])
 			if strings.Contains(title, WindowTitlePrefix) {
-				found = append(found, hwnd)
+				enumFoundList = append(enumFoundList, hwnd)
 			}
 		}
-		return 1 // continue
+		return 1
 	})
-	procEnumWindows.Call(cb, 0)
-	return found
+)
+
+// FindAllTraffCountWindows returns top-level HWNDs matching WindowTitlePrefix.
+func FindAllTraffCountWindows(visibleOnly bool) []uintptr {
+	enumMu.Lock()
+	defer enumMu.Unlock()
+	enumTargetVisibleOnly = visibleOnly
+	enumFoundList = nil
+	procEnumWindows.Call(sharedEnumCallback, 0)
+	res := make([]uintptr, len(enumFoundList))
+	copy(res, enumFoundList)
+	return res
 }
 
 // ApplyTopmostToAllWindows sets HWND_TOPMOST or HWND_NOTOPMOST on all matching TraffCount windows.
 func ApplyTopmostToAllWindows(topmost bool) bool {
-	hwlist := FindAllTraffCountWindows()
+	hwlist := FindAllTraffCountWindows(false)
 	for _, hwnd := range hwlist {
 		applyTopmost(hwnd, topmost)
 	}
