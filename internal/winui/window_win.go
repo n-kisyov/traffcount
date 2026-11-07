@@ -27,6 +27,7 @@ var (
 	procGetWindowRect   = user32.NewProc("GetWindowRect")
 	procSetForeground   = user32.NewProc("SetForegroundWindow")
 	procShowWindow      = user32.NewProc("ShowWindow")
+	procPostMessageW    = user32.NewProc("PostMessageW")
 	procIsWindowVisible = user32.NewProc("IsWindowVisible")
 	procIsIconic        = user32.NewProc("IsIconic")
 	procIsZoomed        = user32.NewProc("IsZoomed")
@@ -34,6 +35,7 @@ var (
 )
 
 const (
+	WM_CLOSE         = 0x0010
 	SWP_NOSIZE       = 0x0001
 	SWP_NOMOVE       = 0x0002
 	SWP_NOZORDER     = 0x0004
@@ -153,21 +155,18 @@ func (m *Manager) SetAlwaysOnTop(topmost bool) bool {
 }
 
 // InterceptMinimizeToTray checks if any TraffCount window has been minimized (IsIconic)
-// and immediately hides it from the taskbar (SW_HIDE) so minimizing sends it to the System Tray only.
+// and immediately closes it (WM_CLOSE) so minimizing behaves identically to closing the window to the System Tray.
 func (m *Manager) InterceptMinimizeToTray() bool {
-	hwlist := FindAllTraffCountWindows(false)
-	hidAny := false
+	hwlist := FindAllTraffCountWindows(true)
+	closedAny := false
 	for _, hwnd := range hwlist {
 		iconic, _, _ := procIsIconic.Call(hwnd)
 		if iconic != 0 {
-			vis, _, _ := procIsWindowVisible.Call(hwnd)
-			if vis != 0 {
-				procShowWindow.Call(hwnd, SW_HIDE)
-				hidAny = true
-			}
+			procPostMessageW.Call(hwnd, WM_CLOSE, 0, 0)
+			closedAny = true
 		}
 	}
-	return hidAny
+	return closedAny
 }
 
 // EnforceAlwaysOnTop checks open TraffCount windows and ensures their WS_EX_TOPMOST style matches topmost.
@@ -185,13 +184,13 @@ func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 	}
 }
 
-// OpenDashboard brings an existing TraffCount window to the foreground (even if hidden in tray), or launches a new native-like app window.
+// OpenDashboard brings an existing TraffCount window to the foreground, or launches a new native-like app window.
 func (m *Manager) OpenDashboard() error {
 	m.mu.Lock()
 	topmost := m.alwaysOnTop
 	url := m.url
 	bounds := m.bounds
-	if hwnd := FindAnyTraffCountWindow(); hwnd != 0 {
+	if hwnd := FindTraffCountWindow(); hwnd != 0 {
 		m.mu.Unlock()
 		focusExistingWindow(hwnd, topmost, bounds)
 		return nil
@@ -325,6 +324,13 @@ var (
 			if vis == 0 {
 				return 1
 			}
+		}
+		var r winRect
+		retRect, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+		iconic, _, _ := procIsIconic.Call(hwnd)
+		if iconic == 0 && (retRect == 0 || (r.Right-r.Left) < 200 || (r.Bottom-r.Top) < 150) {
+			// Skip helper/zero-size internal Chromium message windows
+			return 1
 		}
 		buf := make([]uint16, 256)
 		ret, _, _ := procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))

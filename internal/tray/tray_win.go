@@ -35,14 +35,18 @@ const (
 	WM_QUIT_APP      = WM_USER + 22
 	WM_SET_TOPMOST   = WM_USER + 23
 	WM_SET_STARTUP   = WM_USER + 24
+	WM_UPDATE_TIP    = WM_USER + 25
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
 	WM_CONTEXTMENU   = 0x007B
+	NIN_SELECT       = WM_USER + 0
+	NIN_KEYSELECT    = WM_USER + 1
 
-	NIM_ADD    = 0x00000000
-	NIM_MODIFY = 0x00000001
-	NIM_DELETE = 0x00000002
+	NIM_ADD        = 0x00000000
+	NIM_MODIFY     = 0x00000001
+	NIM_DELETE     = 0x00000002
+	NIM_SETVERSION = 0x00000004
 
 	NIF_MESSAGE = 0x00000001
 	NIF_ICON    = 0x00000002
@@ -60,6 +64,9 @@ const (
 	TPM_BOTTOMALIGN = 0x0020
 	TPM_LEFTALIGN   = 0x0000
 	TPM_RIGHTBUTTON = 0x0002
+	TPM_RETURNCMD   = 0x0100
+	TPM_NONOTIFY    = 0x0080
+	WM_NULL         = 0x0000
 
 	cmdOpenDashboard  = 1001
 	cmdStayOnTop      = 1002
@@ -317,7 +324,7 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case WM_TRAYICON:
 		low := uint32(lParam & 0xFFFF)
 		switch low {
-		case WM_LBUTTONUP:
+		case WM_LBUTTONUP, WM_LBUTTONDBLCLK, NIN_SELECT, NIN_KEYSELECT:
 			if c != nil && c.opts.WinMgr != nil {
 				go c.opts.WinMgr.OpenDashboard()
 			}
@@ -328,6 +335,13 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 			}
 			return 0
 		}
+
+	case WM_UPDATE_TIP:
+		if c != nil {
+			c.nid.UFlags = NIF_TIP
+			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
+		}
+		return 0
 
 	case WM_COMMAND:
 		cmdID := uint32(wParam & 0xFFFF)
@@ -404,15 +418,21 @@ func (c *Controller) showContextMenu(hwnd windows.Handle) {
 	var pt point
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	procSetForegroundWindow.Call(uintptr(hwnd))
-	procTrackPopupMenu.Call(
+	cmdID, _, _ := procTrackPopupMenu.Call(
 		hMenu,
-		TPM_BOTTOMALIGN|TPM_LEFTALIGN|TPM_RIGHTBUTTON,
+		TPM_BOTTOMALIGN|TPM_LEFTALIGN|TPM_RIGHTBUTTON|TPM_RETURNCMD|TPM_NONOTIFY,
 		uintptr(pt.X),
 		uintptr(pt.Y),
 		0,
 		uintptr(hwnd),
 		0,
 	)
+	// Required by Win32 Shell_NotifyIcon popup menu docs so the menu dismisses cleanly
+	// and subsequent tray clicks are never swallowed
+	procPostMessageW.Call(uintptr(hwnd), WM_NULL, 0, 0)
+	if cmdID != 0 {
+		c.handleCommand(uint32(cmdID))
+	}
 }
 
 func (c *Controller) handleCommand(cmdID uint32) {
@@ -488,7 +508,7 @@ func setTipText(nid *notifyIconDataW, text string) {
 }
 
 func (c *Controller) windowMinimizeWatcher(ctx context.Context) {
-	ticker := time.NewTicker(120 * time.Millisecond)
+	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -556,8 +576,9 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 						formatSpeedBits(snap.TotalTxBps),
 					)
 					setTipText(&c.nid, tip)
-					c.nid.UFlags = NIF_TIP
-					procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
+					if c.hwnd != 0 {
+						procPostMessageW.Call(uintptr(c.hwnd), WM_UPDATE_TIP, 0, 0)
+					}
 				}
 				resp.Body.Close()
 			}
