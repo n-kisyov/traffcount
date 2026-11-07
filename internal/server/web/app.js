@@ -40,6 +40,16 @@
   const viewSubtitleEl = document.getElementById("viewSubtitle");
   const btnStayOnTop = document.getElementById("btnStayOnTop");
   const btnQuickTheme = document.getElementById("btnQuickTheme");
+  const quickThemeLabel = document.getElementById("quickThemeLabel");
+
+  const THEMES = [
+    { id: "dark", label: "Win11 Dark" },
+    { id: "antigravity", label: "Antigravity IDE" },
+    { id: "nord", label: "Nord" },
+    { id: "dracula", label: "Dracula" },
+    { id: "emerald", label: "Emerald" },
+    { id: "light", label: "Light" },
+  ];
 
   // Realtime DOM
   const rtRxSpeedEl = document.getElementById("rtRxSpeed");
@@ -145,8 +155,12 @@
 
   // Theme & Settings Management
   function applySettingsToUI() {
-    const theme = state.settings.theme === "light" ? "light" : "dark";
+    const validTheme = THEMES.find((t) => t.id === state.settings.theme) || THEMES[0];
+    const theme = validTheme.id;
     htmlEl.setAttribute("data-theme", theme);
+    if (quickThemeLabel) {
+      quickThemeLabel.textContent = validTheme.label;
+    }
 
     themeButtons.forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.themeVal === theme);
@@ -244,8 +258,9 @@
 
   // Quick Theme Button & Segmented Controls
   btnQuickTheme.addEventListener("click", () => {
-    const next = state.settings.theme === "dark" ? "light" : "dark";
-    saveSettings({ theme: next });
+    const idx = THEMES.findIndex((t) => t.id === state.settings.theme);
+    const nextIdx = (idx + 1) % THEMES.length;
+    saveSettings({ theme: THEMES[nextIdx].id });
   });
 
   themeButtons.forEach((btn) => {
@@ -1055,6 +1070,10 @@
         const res = await fetch("/api/settings");
         if (res.ok) {
           const cfg = await res.json();
+          if (cfg.theme && cfg.theme !== state.settings.theme) {
+            state.settings.theme = cfg.theme;
+            applySettingsToUI();
+          }
           if (cfg.alwaysOnTop !== state.settings.alwaysOnTop) {
             state.settings.alwaysOnTop = cfg.alwaysOnTop;
             chkAlwaysOnTop.checked = !!cfg.alwaysOnTop;

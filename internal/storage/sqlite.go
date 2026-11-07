@@ -44,6 +44,20 @@ func DefaultWindowBounds() WindowBounds {
 	}
 }
 
+// ValidThemes lists all supported UI theme identifiers.
+var ValidThemes = map[string]bool{
+	"dark":        true, // Windows 11 Dark (Default)
+	"antigravity": true, // Antigravity IDE (Dark Modern)
+	"nord":        true, // Nord Polar Dark
+	"dracula":     true, // Dracula Dark
+	"emerald":     true, // Matrix / Emerald Cyber Dark
+	"light":       true, // Windows 11 Light
+}
+
+func isValidTheme(t string) bool {
+	return ValidThemes[t]
+}
+
 // DefaultSettings returns default app settings (Dark mode default).
 func DefaultSettings() Settings {
 	return Settings{
@@ -198,7 +212,7 @@ func (s *Store) GetSettings() (Settings, error) {
 		return cfg, err
 	}
 	_ = json.Unmarshal([]byte(raw), &cfg)
-	if cfg.Theme != "light" && cfg.Theme != "dark" {
+	if !isValidTheme(cfg.Theme) {
 		cfg.Theme = "dark"
 	}
 	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {
@@ -212,7 +226,7 @@ func (s *Store) SaveSettings(cfg Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if cfg.Theme != "light" && cfg.Theme != "dark" {
+	if !isValidTheme(cfg.Theme) {
 		cfg.Theme = "dark"
 	}
 	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {

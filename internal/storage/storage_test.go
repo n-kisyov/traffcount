@@ -45,6 +45,18 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 		t.Errorf("unexpected reloaded settings: %+v", cfg2)
 	}
 
+	// Verify custom themes (antigravity, nord, dracula, emerald) persist across reloads
+	for _, th := range []string{"antigravity", "nord", "dracula", "emerald", "dark"} {
+		cfg2.Theme = th
+		if err := store.SaveSettings(cfg2); err != nil {
+			t.Fatalf("save theme %s: %v", th, err)
+		}
+		gotCfg, err := store.GetSettings()
+		if err != nil || gotCfg.Theme != th {
+			t.Errorf("expected persisted theme %q, got %q (err=%v)", th, gotCfg.Theme, err)
+		}
+	}
+
 	// Verify WindowBounds persistence
 	wantBounds := WindowBounds{
 		X:         240,

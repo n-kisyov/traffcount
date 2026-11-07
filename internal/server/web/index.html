@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TraffCount — Network Monitor</title>
-  <link rel="stylesheet" href="/style.css?v=3" />
+  <link rel="stylesheet" href="/style.css?v=4" />
 </head>
 <body>
   <div class="app-shell">
@@ -80,10 +80,15 @@
           </button>
 
           <!-- Quick Theme Toggle Button -->
-          <button id="btnQuickTheme" class="icon-btn" title="Switch Dark / Light Mode">
-            <svg id="iconMoon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          <button id="btnQuickTheme" class="action-pill" title="Cycle Color Theme">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle>
+              <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle>
+              <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle>
+              <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle>
+              <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"></path>
             </svg>
+            <span id="quickThemeLabel">Dark</span>
           </button>
         </div>
       </header>
@@ -323,14 +328,18 @@
             <h3>Appearance &amp; Window Behavior</h3>
             <p class="settings-desc">Customize how TraffCount looks and behaves on your Windows 11 desktop.</p>
 
-            <div class="setting-row">
+            <div class="setting-row setting-row-col">
               <div>
                 <div class="setting-title">Color Theme</div>
-                <div class="setting-hint">Switch between Windows 11 Dark Mode (default) and Light Mode.</div>
+                <div class="setting-hint">Switch between Dark, Antigravity IDE (Dark Modern), Nord, Dracula, Emerald, and Light themes.</div>
               </div>
-              <div class="segmented-control" id="themeSelector">
-                <button class="seg-btn active" data-theme-val="dark">Dark Mode</button>
-                <button class="seg-btn" data-theme-val="light">Light Mode</button>
+              <div class="segmented-control theme-segmented" id="themeSelector">
+                <button class="seg-btn active" data-theme-val="dark">Win11 Dark</button>
+                <button class="seg-btn" data-theme-val="antigravity">Antigravity IDE</button>
+                <button class="seg-btn" data-theme-val="nord">Nord</button>
+                <button class="seg-btn" data-theme-val="dracula">Dracula</button>
+                <button class="seg-btn" data-theme-val="emerald">Emerald</button>
+                <button class="seg-btn" data-theme-val="light">Light</button>
               </div>
             </div>
 
@@ -421,7 +430,7 @@
     </main>
   </div>
 
-  <script src="/app.js?v=6"></script>
+  <script src="/app.js?v=7"></script>
 </body>
 </html>
 
