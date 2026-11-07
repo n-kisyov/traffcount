@@ -7,13 +7,15 @@ if (Test-Path .\traffcount.exe) {
     Start-Sleep -Milliseconds 400
 }
 
-# 2. Check if TraffCountService is currently running; if so, stop it before overwriting traffcount.exe
+# 2. Check if TraffCountService is currently running; if so, ask it to stop via its local API (which runs as SYSTEM)
 $svc = Get-Service -Name "TraffCountService" -ErrorAction SilentlyContinue
 $wasServiceRunning = ($null -ne $svc -and $svc.Status -eq "Running")
 if ($wasServiceRunning) {
     Write-Host "Stopping TraffCountService before build..." -ForegroundColor Yellow
-    Stop-Service -Name "TraffCountService" -Force -ErrorAction SilentlyContinue
-    for ($i = 0; $i -lt 10; $i++) {
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:9876/api/service" -Method Post -ContentType "application/json" -Body '{"action":"stop"}' -TimeoutSec 3 | Out-Null
+    } catch {}
+    for ($i = 0; $i -lt 12; $i++) {
         $s = Get-Service -Name "TraffCountService" -ErrorAction SilentlyContinue
         if ($null -eq $s -or $s.Status -eq "Stopped") { break }
         Start-Sleep -Milliseconds 400
@@ -27,9 +29,3 @@ Write-Host "Building traffcount.exe (Windows GUI subsystem + Windows Service)...
 go build -ldflags="-s -w -H=windowsgui" -o traffcount.exe ./cmd/traffcount
 
 Write-Host "Build complete: $(Resolve-Path .\traffcount.exe)" -ForegroundColor Green
-
-# 3. If TraffCountService was running before the build, start it back up
-if ($wasServiceRunning) {
-    Write-Host "Starting TraffCountService with updated binary..." -ForegroundColor Cyan
-    Start-Service -Name "TraffCountService" -ErrorAction SilentlyContinue
-}

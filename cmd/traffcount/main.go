@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -80,16 +81,25 @@ func main() {
 	// Check if the TraffCount Windows Service is already listening on dashboardURL
 	alreadyRunning := isServerAlive(dashboardURL)
 
-	// Load initial settings to know AlwaysOnTop state
+	// Load initial settings and saved window bounds
 	var initialTopmost bool
+	var initialBounds storage.WindowBounds
 	if st, err := storage.Open(""); err == nil {
 		if cfg, err := st.GetSettings(); err == nil {
 			initialTopmost = cfg.AlwaysOnTop
 		}
+		if b, err := st.GetWindowBounds(); err == nil {
+			initialBounds = b
+		}
 		st.Close()
+	} else if alreadyRunning {
+		initialBounds = fetchBoundsFromServer(dashboardURL)
 	}
 
 	winMgr := winui.NewManager(dashboardURL, initialTopmost)
+	if initialBounds.HasValue {
+		winMgr.SetSavedBounds(initialBounds)
+	}
 	var trayCtrl *tray.Controller
 
 	trayCtrl = tray.NewController(tray.Options{
@@ -140,6 +150,9 @@ func runDaemon(ctx context.Context, addr string, winMgr *winui.Manager, onTopCha
 	if winMgr == nil {
 		cfg, _ := store.GetSettings()
 		winMgr = winui.NewManager("http://"+addr, cfg.AlwaysOnTop)
+	}
+	if b, err := store.GetWindowBounds(); err == nil && b.HasValue {
+		winMgr.SetSavedBounds(b)
 	}
 
 	coll := collector.New(store)
@@ -217,6 +230,20 @@ func waitForServer(baseURL string, timeout time.Duration) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func fetchBoundsFromServer(baseURL string) storage.WindowBounds {
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	resp, err := client.Get(baseURL + "/api/window/bounds")
+	if err != nil {
+		return storage.DefaultWindowBounds()
+	}
+	defer resp.Body.Close()
+	var b storage.WindowBounds
+	if json.NewDecoder(resp.Body).Decode(&b) == nil {
+		return b
+	}
+	return storage.DefaultWindowBounds()
 }
 
 func attachParentConsole() {

@@ -16,10 +16,31 @@ import (
 type Settings struct {
 	Theme          string `json:"theme"`          // "dark" (default) or "light"
 	AlwaysOnTop    bool   `json:"alwaysOnTop"`    // Keep GUI window on top
+	StartOnBoot    bool   `json:"startOnBoot"`    // Start minimized to tray on system boot
 	SpeedUnit      string `json:"speedUnit"`      // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
 	HideLoopback   bool   `json:"hideLoopback"`   // Hide Loopback / tunnel adapters
 	RetentionDays  int    `json:"retentionDays"`  // How many days of history to keep (default 365)
 	RefreshRateMs  int    `json:"refreshRateMs"`  // Default 1000ms
+}
+
+// WindowBounds stores the last screen coordinates and size of the dashboard window.
+type WindowBounds struct {
+	X         int  `json:"x"`
+	Y         int  `json:"y"`
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Maximized bool `json:"maximized"`
+	HasValue  bool `json:"hasValue"`
+}
+
+// DefaultWindowBounds returns the default size before any user resize/move.
+func DefaultWindowBounds() WindowBounds {
+	return WindowBounds{
+		X:      120,
+		Y:      80,
+		Width:  1180,
+		Height: 780,
+	}
 }
 
 // DefaultSettings returns default app settings (Dark mode default).
@@ -205,6 +226,50 @@ func (s *Store) SaveSettings(cfg Settings) error {
 	}
 	_, err = s.db.Exec(`
 		INSERT INTO settings (key, value) VALUES ('app_settings', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+	`, string(data))
+	return err
+}
+
+// GetWindowBounds retrieves saved window position and size from SQLite.
+func (s *Store) GetWindowBounds() (WindowBounds, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	b := DefaultWindowBounds()
+	var raw string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = 'window_bounds'`).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return b, nil
+	}
+	if err != nil {
+		return b, err
+	}
+	_ = json.Unmarshal([]byte(raw), &b)
+	if b.Width < 400 {
+		b.Width = 1180
+	}
+	if b.Height < 300 {
+		b.Height = 780
+	}
+	return b, nil
+}
+
+// SaveWindowBounds persists window position and size to SQLite.
+func (s *Store) SaveWindowBounds(b WindowBounds) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if b.Width < 400 || b.Height < 300 {
+		return nil
+	}
+	b.HasValue = true
+	data, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO settings (key, value) VALUES ('window_bounds', ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value
 	`, string(data))
 	return err

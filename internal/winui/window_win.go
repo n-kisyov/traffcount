@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"traffcount/internal/storage"
 )
 
 const WindowTitlePrefix = "TraffCount — Network Monitor"
@@ -23,18 +24,23 @@ var (
 	procEnumWindows     = user32.NewProc("EnumWindows")
 	procGetWindowTextW  = user32.NewProc("GetWindowTextW")
 	procSetWindowPos    = user32.NewProc("SetWindowPos")
+	procGetWindowRect   = user32.NewProc("GetWindowRect")
 	procSetForeground   = user32.NewProc("SetForegroundWindow")
 	procShowWindow      = user32.NewProc("ShowWindow")
 	procIsWindowVisible = user32.NewProc("IsWindowVisible")
 	procIsIconic        = user32.NewProc("IsIconic")
+	procIsZoomed        = user32.NewProc("IsZoomed")
+	procGetWindowLongW  = user32.NewProc("GetWindowLongW")
 )
 
 const (
 	SWP_NOSIZE       = 0x0001
 	SWP_NOMOVE       = 0x0002
+	SWP_NOZORDER     = 0x0004
 	SWP_NOACTIVATE   = 0x0010
 	SWP_FRAMECHANGED = 0x0020
 	SWP_SHOWWINDOW   = 0x0040
+	SW_MAXIMIZE      = 3
 	SW_SHOW          = 5
 	SW_RESTORE       = 9
 	HWND_TOPMOST     = ^uintptr(0)     // -1
@@ -44,13 +50,19 @@ const (
 	WS_EX_TOPMOST    = 0x00000008
 )
 
-var procGetWindowLongW = user32.NewProc("GetWindowLongW")
+type winRect struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
 
-// Manager controls the GUI app window and its Always-On-Top ("Stay on Top") state.
+// Manager controls the GUI app window, its Always-On-Top ("Stay on Top") state, and saved window bounds.
 type Manager struct {
 	mu          sync.Mutex
 	url         string
 	alwaysOnTop bool
+	bounds      storage.WindowBounds
 	launching   bool
 }
 
@@ -59,7 +71,66 @@ func NewManager(url string, initialTopmost bool) *Manager {
 	return &Manager{
 		url:         url,
 		alwaysOnTop: initialTopmost,
+		bounds:      storage.DefaultWindowBounds(),
 	}
+}
+
+// SetSavedBounds updates the stored window position and size to use on next launch.
+func (m *Manager) SetSavedBounds(b storage.WindowBounds) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b.Width >= 400 && b.Height >= 300 {
+		m.bounds = b
+	}
+}
+
+// GetSavedBounds returns the most recently tracked or loaded window bounds.
+func (m *Manager) GetSavedBounds() storage.WindowBounds {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bounds
+}
+
+// CaptureLiveWindowBounds inspects any currently open normal (non-minimized) TraffCount window
+// on the desktop and updates m.bounds if found.
+func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
+	hwnd := FindTraffCountWindow()
+	if hwnd == 0 {
+		return storage.WindowBounds{}, false
+	}
+	iconic, _, _ := procIsIconic.Call(hwnd)
+	if iconic != 0 {
+		// Don't overwrite normal window bounds while minimized to taskbar (-32000,-32000)
+		return storage.WindowBounds{}, false
+	}
+	zoomed, _, _ := procIsZoomed.Call(hwnd)
+	var r winRect
+	ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+	if ret == 0 {
+		return storage.WindowBounds{}, false
+	}
+	w := int(r.Right - r.Left)
+	h := int(r.Bottom - r.Top)
+	if w < 400 || h < 300 {
+		return storage.WindowBounds{}, false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if zoomed != 0 {
+		m.bounds.Maximized = true
+		m.bounds.HasValue = true
+	} else {
+		m.bounds = storage.WindowBounds{
+			X:         int(r.Left),
+			Y:         int(r.Top),
+			Width:     w,
+			Height:    h,
+			Maximized: false,
+			HasValue:  true,
+		}
+	}
+	return m.bounds, true
 }
 
 // IsAlwaysOnTop returns the current "Stay on Top" setting.
@@ -98,6 +169,7 @@ func (m *Manager) OpenDashboard() error {
 	m.mu.Lock()
 	topmost := m.alwaysOnTop
 	url := m.url
+	bounds := m.bounds
 	if hwnd := FindTraffCountWindow(); hwnd != 0 {
 		m.mu.Unlock()
 		focusExistingWindow(hwnd, topmost)
@@ -118,14 +190,27 @@ func (m *Manager) OpenDashboard() error {
 		profileDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "TraffCount", "WebViewProfile")
 		_ = os.MkdirAll(profileDir, 0755)
 
-		cmd := exec.Command(
-			edgePath,
+		w := bounds.Width
+		h := bounds.Height
+		if w < 400 {
+			w = 1180
+		}
+		if h < 300 {
+			h = 780
+		}
+
+		args := []string{
 			fmt.Sprintf("--app=%s", url),
 			fmt.Sprintf("--user-data-dir=%s", profileDir),
-			"--window-size=1180,780",
+			fmt.Sprintf("--window-size=%d,%d", w, h),
 			"--no-first-run",
 			"--disable-features=Translate",
-		)
+		}
+		if bounds.HasValue {
+			args = append(args, fmt.Sprintf("--window-position=%d,%d", bounds.X, bounds.Y))
+		}
+
+		cmd := exec.Command(edgePath, args...)
 		if err := cmd.Start(); err == nil {
 			go func() {
 				defer func() {
@@ -133,10 +218,14 @@ func (m *Manager) OpenDashboard() error {
 					m.launching = false
 					m.mu.Unlock()
 				}()
-				// Poll briefly for the window to appear so we can apply Always-On-Top and focus
+				// Poll briefly for the window to appear so we can apply saved bounds, Always-On-Top, and focus
 				for i := 0; i < 30; i++ {
 					time.Sleep(100 * time.Millisecond)
 					if hwnd := FindTraffCountWindow(); hwnd != 0 {
+						b := m.GetSavedBounds()
+						if b.HasValue {
+							applyWindowBounds(hwnd, b)
+						}
 						applyTopmost(hwnd, m.IsAlwaysOnTop())
 						procSetForeground.Call(hwnd)
 						break
@@ -153,6 +242,23 @@ func (m *Manager) OpenDashboard() error {
 
 	// Fallback: open in default browser
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
+	if b.Width >= 400 && b.Height >= 300 {
+		procSetWindowPos.Call(
+			hwnd,
+			0,
+			uintptr(int32(b.X)),
+			uintptr(int32(b.Y)),
+			uintptr(int32(b.Width)),
+			uintptr(int32(b.Height)),
+			SWP_NOZORDER|SWP_NOACTIVATE,
+		)
+	}
+	if b.Maximized {
+		procShowWindow.Call(hwnd, SW_MAXIMIZE)
+	}
 }
 
 func focusExistingWindow(hwnd uintptr, topmost bool) {

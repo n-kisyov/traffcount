@@ -53,6 +53,7 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/window/topmost", s.handleWindowTopmost)
+	mux.HandleFunc("/api/window/bounds", s.handleWindowBounds)
 	mux.HandleFunc("/api/service", s.handleService)
 	mux.HandleFunc("/ws", s.handleWS)
 
@@ -196,6 +197,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if s.winMgr != nil {
 			s.winMgr.SetAlwaysOnTop(cfg.AlwaysOnTop)
 		}
+		_ = tray.SetStartupEnabled(cfg.StartOnBoot)
+		tray.NotifyTrayStartup(cfg.StartOnBoot)
 		tray.NotifyTrayTopmost(cfg.AlwaysOnTop)
 		if s.onTopChanged != nil {
 			s.onTopChanged(cfg.AlwaysOnTop)
@@ -238,6 +241,36 @@ func (s *Server) handleWindowTopmost(w http.ResponseWriter, r *http.Request) {
 		"alwaysOnTop": req.AlwaysOnTop,
 		"applied":     applied,
 	})
+}
+
+func (s *Server) handleWindowBounds(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		b, err := s.store.GetWindowBounds()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, b)
+
+	case http.MethodPost, http.MethodPut:
+		var b storage.WindowBounds
+		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		if b.Width >= 400 && b.Height >= 300 {
+			b.HasValue = true
+			_ = s.store.SaveWindowBounds(b)
+			if s.winMgr != nil {
+				s.winMgr.SetSavedBounds(b)
+			}
+		}
+		writeJSON(w, http.StatusOK, b)
+
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleService(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@
     settings: {
       theme: "dark",
       alwaysOnTop: false,
+      startOnBoot: false,
       speedUnit: "bits",
       hideLoopback: true,
       retentionDays: 365,
@@ -88,6 +89,7 @@
   const themeButtons = document.querySelectorAll("#themeSelector .seg-btn");
   const unitButtons = document.querySelectorAll("#unitSelector .seg-btn");
   const chkAlwaysOnTop = document.getElementById("chkAlwaysOnTop");
+  const chkStartOnBoot = document.getElementById("chkStartOnBoot");
   const chkHideLoopback = document.getElementById("chkHideLoopback");
   const svcStateText = document.getElementById("svcStateText");
   const svcBadge = document.getElementById("svcBadge");
@@ -152,6 +154,7 @@
     });
 
     chkAlwaysOnTop.checked = !!state.settings.alwaysOnTop;
+    if (chkStartOnBoot) chkStartOnBoot.checked = !!state.settings.startOnBoot;
     chkHideLoopback.checked = !!state.settings.hideLoopback;
     btnStayOnTop.classList.toggle("pinned", !!state.settings.alwaysOnTop);
 
@@ -219,6 +222,12 @@
   chkAlwaysOnTop.addEventListener("change", (e) => {
     saveSettings({ alwaysOnTop: e.target.checked });
   });
+
+  if (chkStartOnBoot) {
+    chkStartOnBoot.addEventListener("change", (e) => {
+      saveSettings({ startOnBoot: e.target.checked });
+    });
+  }
 
   chkHideLoopback.addEventListener("change", (e) => {
     saveSettings({ hideLoopback: e.target.checked });
@@ -990,7 +999,35 @@
     } else if (state.activeTab === "history" && state.historyReport) {
       drawHistoryChart(state.historyReport);
     }
+    reportWindowBounds();
   });
+
+  function reportWindowBounds() {
+    if (window.outerWidth < 400 || window.outerHeight < 300 || window.screenX < -10000 || window.screenY < -10000) {
+      return;
+    }
+    const payload = JSON.stringify({
+      x: Math.round(window.screenX),
+      y: Math.round(window.screenY),
+      width: Math.round(window.outerWidth),
+      height: Math.round(window.outerHeight),
+      maximized: false,
+      hasValue: true,
+    });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/window/bounds", new Blob([payload], { type: "application/json" }));
+    } else {
+      fetch("/api/window/bounds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+
+  window.addEventListener("beforeunload", reportWindowBounds);
+  window.addEventListener("pagehide", reportWindowBounds);
 
   // Set default dates for custom picker
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -1003,7 +1040,7 @@
     connectWebSocket();
     fetchServiceStatus();
     fetchConnections();
-    // Periodically sync settings in case Stay on Top was toggled from the System Tray menu
+    // Periodically sync settings in case Stay on Top or Start on Boot was toggled from the System Tray menu
     setInterval(async () => {
       try {
         const res = await fetch("/api/settings");
@@ -1013,6 +1050,10 @@
             state.settings.alwaysOnTop = cfg.alwaysOnTop;
             chkAlwaysOnTop.checked = !!cfg.alwaysOnTop;
             btnStayOnTop.classList.toggle("pinned", !!cfg.alwaysOnTop);
+          }
+          if (cfg.startOnBoot !== state.settings.startOnBoot) {
+            state.settings.startOnBoot = cfg.startOnBoot;
+            if (chkStartOnBoot) chkStartOnBoot.checked = !!cfg.startOnBoot;
           }
         }
       } catch (_) {}

@@ -31,6 +31,7 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 	// 2. Save updated settings (Light mode + AlwaysOnTop)
 	cfg.Theme = "light"
 	cfg.AlwaysOnTop = true
+	cfg.StartOnBoot = true
 	cfg.SpeedUnit = "bytes"
 	if err := store.SaveSettings(cfg); err != nil {
 		t.Fatalf("save settings: %v", err)
@@ -40,8 +41,27 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload settings: %v", err)
 	}
-	if cfg2.Theme != "light" || !cfg2.AlwaysOnTop || cfg2.SpeedUnit != "bytes" {
+	if cfg2.Theme != "light" || !cfg2.AlwaysOnTop || !cfg2.StartOnBoot || cfg2.SpeedUnit != "bytes" {
 		t.Errorf("unexpected reloaded settings: %+v", cfg2)
+	}
+
+	// Verify WindowBounds persistence
+	wantBounds := WindowBounds{
+		X:         240,
+		Y:         160,
+		Width:     1320,
+		Height:    840,
+		Maximized: false,
+	}
+	if err := store.SaveWindowBounds(wantBounds); err != nil {
+		t.Fatalf("save window bounds: %v", err)
+	}
+	gotBounds, err := store.GetWindowBounds()
+	if err != nil {
+		t.Fatalf("get window bounds: %v", err)
+	}
+	if gotBounds.X != 240 || gotBounds.Y != 160 || gotBounds.Width != 1320 || gotBounds.Height != 840 || !gotBounds.HasValue {
+		t.Errorf("unexpected window bounds: %+v", gotBounds)
 	}
 
 	// 3. Seed historical traffic across 14 days and 30 days for two NICs

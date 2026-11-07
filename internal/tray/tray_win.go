@@ -34,6 +34,7 @@ const (
 	WM_SHOWDASHBOARD = WM_USER + 21
 	WM_QUIT_APP      = WM_USER + 22
 	WM_SET_TOPMOST   = WM_USER + 23
+	WM_SET_STARTUP   = WM_USER + 24
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
@@ -197,6 +198,21 @@ func NotifyTrayTopmost(topmost bool) bool {
 	return false
 }
 
+// NotifyTrayStartup sends a Win32 message to the interactive tray window to update HKCU\...\Run.
+func NotifyTrayStartup(enable bool) bool {
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		var wp uintptr
+		if enable {
+			wp = 1
+		}
+		procPostMessageW.Call(hwnd, WM_SET_STARTUP, wp, 0)
+		return true
+	}
+	return false
+}
+
 // SignalExistingTrayInstance finds an already-running TraffCount tray hidden window and tells it to open/focus the dashboard.
 func SignalExistingTrayInstance() bool {
 	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
@@ -335,6 +351,11 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 
+	case WM_SET_STARTUP:
+		enable := wParam != 0
+		_ = SetStartupEnabled(enable)
+		return 0
+
 	case WM_CLOSE, WM_QUIT_APP:
 		procDestroyWindow.Call(hwnd)
 		return 0
@@ -365,10 +386,10 @@ func (c *Controller) showContextMenu(hwnd windows.Handle) {
 	appendMenuItem(hMenu, topFlags, cmdStayOnTop, "Stay on Top (Always on Top)")
 
 	startupFlags := uint32(MF_STRING)
-	if isStartupEnabled() {
+	if IsStartupEnabled() {
 		startupFlags |= MF_CHECKED
 	}
-	appendMenuItem(hMenu, startupFlags, cmdStartupToggle, "Start Tray Icon with Windows")
+	appendMenuItem(hMenu, startupFlags, cmdStartupToggle, "Start on System Boot (Minimized to Tray)")
 
 	appendMenuItem(hMenu, MF_SEPARATOR, 0, "")
 	appendMenuItem(hMenu, MF_STRING|MF_GRAYED, 0, fmt.Sprintf("Windows Service: %s", c.svcState))
@@ -407,7 +428,9 @@ func (c *Controller) handleCommand(cmdID uint32) {
 		}
 		go c.postTopmostToServer(next)
 	case cmdStartupToggle:
-		_ = setStartupEnabled(!isStartupEnabled())
+		next := !IsStartupEnabled()
+		_ = SetStartupEnabled(next)
+		go c.postStartOnBootToServer(next)
 	case cmdSvcInstall:
 		go service.InstallAndStart()
 	case cmdSvcStart:
@@ -477,11 +500,18 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 			c.svcState = st.StateText
 
 			// Sync settings (including AlwaysOnTop toggled from the Web UI when served by Windows Service)
-			// and continuously enforce HWND_TOPMOST on the interactive desktop window.
+			// and continuously enforce HWND_TOPMOST and capture live window bounds on the interactive desktop window.
+			if c.opts.WinMgr != nil {
+				if b, ok := c.opts.WinMgr.CaptureLiveWindowBounds(); ok {
+					c.postBoundsToServer(b)
+				}
+			}
+
 			sResp, sErr := client.Get(c.opts.DashboardURL + "/api/settings")
 			if sErr == nil && sResp.StatusCode == http.StatusOK {
 				var cfg struct {
 					AlwaysOnTop bool `json:"alwaysOnTop"`
+					StartOnBoot bool `json:"startOnBoot"`
 				}
 				if json.NewDecoder(sResp.Body).Decode(&cfg) == nil {
 					if c.stayOnTop != cfg.AlwaysOnTop {
@@ -491,6 +521,9 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 						}
 					} else if c.opts.WinMgr != nil {
 						c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
+					}
+					if IsStartupEnabled() != cfg.StartOnBoot {
+						_ = SetStartupEnabled(cfg.StartOnBoot)
 					}
 				}
 				sResp.Body.Close()
@@ -525,6 +558,35 @@ func (c *Controller) postTopmostToServer(topmost bool) {
 	}
 }
 
+func (c *Controller) postStartOnBootToServer(enabled bool) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	sResp, err := client.Get(c.opts.DashboardURL + "/api/settings")
+	if err != nil {
+		return
+	}
+	var cfg map[string]any
+	_ = json.NewDecoder(sResp.Body).Decode(&cfg)
+	sResp.Body.Close()
+	if cfg == nil {
+		return
+	}
+	cfg["startOnBoot"] = enabled
+	body, _ := json.Marshal(cfg)
+	resp, err := client.Post(c.opts.DashboardURL+"/api/settings", "application/json", bytes.NewReader(body))
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+func (c *Controller) postBoundsToServer(b any) {
+	client := &http.Client{Timeout: 1000 * time.Millisecond}
+	body, _ := json.Marshal(b)
+	resp, err := client.Post(c.opts.DashboardURL+"/api/window/bounds", "application/json", bytes.NewReader(body))
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
 func formatSpeedBits(bytesPerSec uint64) string {
 	bits := float64(bytesPerSec) * 8.0
 	switch {
@@ -539,7 +601,8 @@ func formatSpeedBits(bytesPerSec uint64) string {
 	}
 }
 
-func isStartupEnabled() bool {
+// IsStartupEnabled checks whether TraffCount is registered in HKCU\...\Run to start on system boot.
+func IsStartupEnabled() bool {
 	k, err := registry.OpenKey(registry.CURRENT_USER, startupRegKey, registry.QUERY_VALUE)
 	if err != nil {
 		return false
@@ -549,7 +612,8 @@ func isStartupEnabled() bool {
 	return err == nil && val != ""
 }
 
-func setStartupEnabled(enable bool) error {
+// SetStartupEnabled configures or removes the HKCU\...\Run entry to launch TraffCount minimized to tray (--tray-only) on boot.
+func SetStartupEnabled(enable bool) error {
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, startupRegKey, registry.SET_VALUE)
 	if err != nil {
 		return err
