@@ -960,6 +960,9 @@
         renderSidebarAdapters(payload);
         if (state.activeTab === "realtime") {
           renderRealtimeView();
+          fetchConnections();
+        } else if (state.activeTab === "history") {
+          fetchHistoryReport();
         }
       } catch (e) {
         console.error("WS parse error:", e);
@@ -1000,7 +1003,6 @@
     connectWebSocket();
     fetchServiceStatus();
     fetchConnections();
-    setInterval(fetchConnections, 2500);
     // Periodically sync settings in case Stay on Top was toggled from the System Tray menu
     setInterval(async () => {
       try {
