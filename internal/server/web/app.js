@@ -7,6 +7,7 @@
       theme: "dark",
       alwaysOnTop: false,
       startOnBoot: false,
+      startMinimized: false,
       speedUnit: "bits",
       hideLoopback: true,
       retentionDays: 365,
@@ -90,6 +91,7 @@
   const unitButtons = document.querySelectorAll("#unitSelector .seg-btn");
   const chkAlwaysOnTop = document.getElementById("chkAlwaysOnTop");
   const chkStartOnBoot = document.getElementById("chkStartOnBoot");
+  const chkStartMinimized = document.getElementById("chkStartMinimized");
   const chkHideLoopback = document.getElementById("chkHideLoopback");
   const svcStateText = document.getElementById("svcStateText");
   const svcBadge = document.getElementById("svcBadge");
@@ -155,6 +157,7 @@
 
     chkAlwaysOnTop.checked = !!state.settings.alwaysOnTop;
     if (chkStartOnBoot) chkStartOnBoot.checked = !!state.settings.startOnBoot;
+    if (chkStartMinimized) chkStartMinimized.checked = !!state.settings.startMinimized;
     chkHideLoopback.checked = !!state.settings.hideLoopback;
     btnStayOnTop.classList.toggle("pinned", !!state.settings.alwaysOnTop);
 
@@ -226,6 +229,12 @@
   if (chkStartOnBoot) {
     chkStartOnBoot.addEventListener("change", (e) => {
       saveSettings({ startOnBoot: e.target.checked });
+    });
+  }
+
+  if (chkStartMinimized) {
+    chkStartMinimized.addEventListener("change", (e) => {
+      saveSettings({ startMinimized: e.target.checked });
     });
   }
 
@@ -1054,6 +1063,10 @@
           if (cfg.startOnBoot !== state.settings.startOnBoot) {
             state.settings.startOnBoot = cfg.startOnBoot;
             if (chkStartOnBoot) chkStartOnBoot.checked = !!cfg.startOnBoot;
+          }
+          if (cfg.startMinimized !== state.settings.startMinimized) {
+            state.settings.startMinimized = cfg.startMinimized;
+            if (chkStartMinimized) chkStartMinimized.checked = !!cfg.startMinimized;
           }
         }
       } catch (_) {}

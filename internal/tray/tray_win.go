@@ -291,6 +291,7 @@ func (c *Controller) Run(ctx context.Context) {
 	}
 
 	go c.statusUpdater(ctx)
+	go c.windowMinimizeWatcher(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -484,6 +485,21 @@ func setTipText(nid *notifyIconDataW, text string) {
 		maxLen = len(u16)
 	}
 	copy(nid.SzTip[:maxLen], u16[:maxLen])
+}
+
+func (c *Controller) windowMinimizeWatcher(ctx context.Context) {
+	ticker := time.NewTicker(120 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if c.opts.WinMgr != nil {
+				c.opts.WinMgr.InterceptMinimizeToTray()
+			}
+		}
+	}
 }
 
 func (c *Controller) statusUpdater(ctx context.Context) {

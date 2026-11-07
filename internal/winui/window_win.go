@@ -52,14 +52,6 @@ const (
 )
 
 var enumMu sync.Mutex
-var enumCb uintptr
-
-func getEnumCallback(fn func(hwnd uintptr)) uintptr {
-	return syscall.NewCallback(func(hwnd uintptr, lparam uintptr) uintptr {
-		fn(hwnd)
-		return 1
-	})
-}
 
 type winRect struct {
 	Left   int32

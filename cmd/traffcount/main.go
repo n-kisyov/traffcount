@@ -83,10 +83,12 @@ func main() {
 
 	// Load initial settings and saved window bounds
 	var initialTopmost bool
+	var startMinimized bool
 	var initialBounds storage.WindowBounds
 	if st, err := storage.Open(""); err == nil {
 		if cfg, err := st.GetSettings(); err == nil {
 			initialTopmost = cfg.AlwaysOnTop
+			startMinimized = cfg.StartMinimized
 		}
 		if b, err := st.GetWindowBounds(); err == nil {
 			initialBounds = b
@@ -94,6 +96,10 @@ func main() {
 		st.Close()
 	} else if alreadyRunning {
 		initialBounds = fetchBoundsFromServer(dashboardURL)
+		if cfg, ok := fetchSettingsFromServer(dashboardURL); ok {
+			initialTopmost = cfg.AlwaysOnTop
+			startMinimized = cfg.StartMinimized
+		}
 	}
 
 	winMgr := winui.NewManager(dashboardURL, initialTopmost)
@@ -102,10 +108,14 @@ func main() {
 	}
 	var trayCtrl *tray.Controller
 
+	// Auto-start on boot passes --tray-only (so it always starts minimized to tray).
+	// Manual start opens the dashboard unless StartMinimized is enabled in settings.
+	shouldAutoOpen := !*trayOnly && !startMinimized
+
 	trayCtrl = tray.NewController(tray.Options{
 		DashboardURL: dashboardURL,
 		WinMgr:       winMgr,
-		AutoOpenUI:   !*trayOnly,
+		AutoOpenUI:   shouldAutoOpen,
 		OnExit: func() {
 			stop()
 		},
@@ -244,6 +254,20 @@ func fetchBoundsFromServer(baseURL string) storage.WindowBounds {
 		return b
 	}
 	return storage.DefaultWindowBounds()
+}
+
+func fetchSettingsFromServer(baseURL string) (storage.Settings, bool) {
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	resp, err := client.Get(baseURL + "/api/settings")
+	if err != nil {
+		return storage.Settings{}, false
+	}
+	defer resp.Body.Close()
+	var cfg storage.Settings
+	if json.NewDecoder(resp.Body).Decode(&cfg) == nil {
+		return cfg, true
+	}
+	return storage.Settings{}, false
 }
 
 func attachParentConsole() {
