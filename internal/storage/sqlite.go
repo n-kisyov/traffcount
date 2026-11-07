@@ -17,6 +17,7 @@ type Settings struct {
 	Theme          string `json:"theme"`          // "dark" (default) or "light"
 	AlwaysOnTop    bool   `json:"alwaysOnTop"`    // Keep GUI window on top
 	StartOnBoot    bool   `json:"startOnBoot"`    // Start minimized to tray on system boot
+	StartMinimized bool   `json:"startMinimized"` // Start minimized to tray when launched manually
 	SpeedUnit      string `json:"speedUnit"`      // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
 	HideLoopback   bool   `json:"hideLoopback"`   // Hide Loopback / tunnel adapters
 	RetentionDays  int    `json:"retentionDays"`  // How many days of history to keep (default 365)
