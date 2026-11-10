@@ -320,6 +320,85 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 	return report, nil
 }
 
+// QuotaStatus represents current billing-cycle data usage against a user-configured cap.
+type QuotaStatus struct {
+	Enabled       bool    `json:"enabled"`
+	IfaceID       string  `json:"ifaceId"`
+	BillingDay    int     `json:"billingDay"`
+	CycleStart    int64   `json:"cycleStart"`
+	CycleLabel    string  `json:"cycleLabel"`
+	CapBytes      uint64  `json:"capBytes"`
+	CapGB         float64 `json:"capGB"`
+	UsedRxBytes   uint64  `json:"usedRxBytes"`
+	UsedTxBytes   uint64  `json:"usedTxBytes"`
+	UsedTotal     uint64  `json:"usedTotal"`
+	UsedPct       float64 `json:"usedPct"`
+	Over80        bool    `json:"over80"`
+	Over100       bool    `json:"over100"`
+}
+
+// QueryQuotaStatus computes usage since the current billing cycle start day.
+func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
+	cfg, err := s.GetSettings()
+	if err != nil {
+		return QuotaStatus{}, err
+	}
+
+	now := time.Now()
+	loc := now.Location()
+	bDay := cfg.BillingDay
+	if bDay < 1 || bDay > 28 {
+		bDay = 1
+	}
+
+	var cycleStart time.Time
+	if now.Day() >= bDay {
+		cycleStart = time.Date(now.Year(), now.Month(), bDay, 0, 0, 0, 0, loc)
+	} else {
+		prev := now.AddDate(0, -1, 0)
+		cycleStart = time.Date(prev.Year(), prev.Month(), bDay, 0, 0, 0, 0, loc)
+	}
+
+	capBytes := uint64(cfg.DataCapGB * 1024 * 1024 * 1024)
+	qs := QuotaStatus{
+		Enabled:    cfg.DataCapEnabled,
+		IfaceID:    cfg.DataCapIface,
+		BillingDay: bDay,
+		CycleStart: cycleStart.Unix(),
+		CycleLabel: fmt.Sprintf("Since %s", cycleStart.Format("Jan 02")),
+		CapBytes:   capBytes,
+		CapGB:      cfg.DataCapGB,
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var rx, tx uint64
+	if cfg.DataCapIface == "" || cfg.DataCapIface == "all" {
+		_ = s.db.QueryRow(`
+			SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
+			FROM traffic_hourly
+			WHERE bucket_ts >= ?
+		`, cycleStart.Unix()).Scan(&rx, &tx)
+	} else {
+		_ = s.db.QueryRow(`
+			SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
+			FROM traffic_hourly
+			WHERE bucket_ts >= ? AND iface_id = ?
+		`, cycleStart.Unix(), cfg.DataCapIface).Scan(&rx, &tx)
+	}
+
+	qs.UsedRxBytes = rx
+	qs.UsedTxBytes = tx
+	qs.UsedTotal = rx + tx
+	if capBytes > 0 {
+		qs.UsedPct = (float64(qs.UsedTotal) / float64(capBytes)) * 100.0
+		qs.Over80 = qs.UsedPct >= 80.0
+		qs.Over100 = qs.UsedPct >= 100.0
+	}
+	return qs, nil
+}
+
 // PruneOldData deletes traffic buckets older than retentionDays.
 func (s *Store) PruneOldData(retentionDays int) error {
 	if retentionDays <= 0 {

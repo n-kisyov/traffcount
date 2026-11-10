@@ -36,6 +36,7 @@ const (
 	WM_SET_TOPMOST   = WM_USER + 23
 	WM_SET_STARTUP   = WM_USER + 24
 	WM_UPDATE_TIP    = WM_USER + 25
+	WM_SHOW_BALLOON  = WM_USER + 26
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
@@ -51,6 +52,9 @@ const (
 	NIF_MESSAGE = 0x00000001
 	NIF_ICON    = 0x00000002
 	NIF_TIP     = 0x00000004
+	NIF_INFO    = 0x00000010
+	NIIF_INFO   = 0x00000001
+	NIIF_WARN   = 0x00000002
 
 	IDI_APPLICATION = 32512
 	IMAGE_ICON      = 1
@@ -160,11 +164,18 @@ type Options struct {
 
 // Controller manages the Windows 11 System Tray icon and context menu.
 type Controller struct {
-	opts      Options
-	hwnd      windows.Handle
-	nid       notifyIconDataW
-	stayOnTop bool
-	svcState  string
+	opts       Options
+	hwnd       windows.Handle
+	nid        notifyIconDataW
+	hIconIdle  windows.Handle
+	hIconRx    windows.Handle
+	hIconTx    windows.Handle
+	hIconBoth  windows.Handle
+	curIcon    windows.Handle
+	stayOnTop  bool
+	svcState   string
+	alerted80  bool
+	alerted100 bool
 }
 
 var activeController *Controller
@@ -270,7 +281,11 @@ func (c *Controller) Run(ctx context.Context) {
 	)
 	c.hwnd = windows.Handle(hwnd)
 
-	hIcon := loadTrayHICON()
+	c.hIconIdle = loadTrayHICONFromBytes(GenerateActivityIconICO(false, false))
+	c.hIconRx = loadTrayHICONFromBytes(GenerateActivityIconICO(true, false))
+	c.hIconTx = loadTrayHICONFromBytes(GenerateActivityIconICO(false, true))
+	c.hIconBoth = loadTrayHICONFromBytes(GenerateActivityIconICO(true, true))
+	c.curIcon = c.hIconBoth
 
 	c.nid = notifyIconDataW{
 		CbSize:           uint32(unsafe.Sizeof(notifyIconDataW{})),
@@ -278,7 +293,7 @@ func (c *Controller) Run(ctx context.Context) {
 		UID:              1,
 		UFlags:           NIF_MESSAGE | NIF_ICON | NIF_TIP,
 		UCallbackMessage: WM_TRAYICON,
-		HIcon:            hIcon,
+		HIcon:            c.curIcon,
 	}
 	setTipText(&c.nid, "TraffCount — Network Traffic Monitor")
 	procShellNotifyIconW.Call(NIM_ADD, uintptr(unsafe.Pointer(&c.nid)))
@@ -338,7 +353,14 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_UPDATE_TIP:
 		if c != nil {
-			c.nid.UFlags = NIF_TIP
+			c.nid.UFlags = NIF_TIP | NIF_ICON
+			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
+		}
+		return 0
+
+	case WM_SHOW_BALLOON:
+		if c != nil {
+			c.nid.UFlags = NIF_INFO
 			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
 		}
 		return 0
@@ -474,7 +496,10 @@ func appendMenuItem(hMenu uintptr, flags uint32, id uintptr, label string) {
 }
 
 func loadTrayHICON() windows.Handle {
-	ico := GenerateIconICO()
+	return loadTrayHICONFromBytes(GenerateIconICO())
+}
+
+func loadTrayHICONFromBytes(ico []byte) windows.Handle {
 	// Offset 22 is start of BITMAPINFOHEADER in our single-entry ICO
 	if len(ico) > 22 {
 		dib := ico[22:]
@@ -493,6 +518,31 @@ func loadTrayHICON() windows.Handle {
 	}
 	h, _, _ := procLoadIconW.Call(0, uintptr(IDI_APPLICATION))
 	return windows.Handle(h)
+}
+
+// ShowBalloonNotification triggers a Windows 11 system tray toast/balloon alert.
+func (c *Controller) ShowBalloonNotification(title, message string, isWarning bool) {
+	if c == nil || c.hwnd == 0 {
+		return
+	}
+	uTitle, _ := syscall.UTF16FromString(title)
+	for i := range c.nid.SzInfoTitle {
+		c.nid.SzInfoTitle[i] = 0
+	}
+	copy(c.nid.SzInfoTitle[:len(c.nid.SzInfoTitle)-1], uTitle)
+
+	uMsg, _ := syscall.UTF16FromString(message)
+	for i := range c.nid.SzInfo {
+		c.nid.SzInfo[i] = 0
+	}
+	copy(c.nid.SzInfo[:len(c.nid.SzInfo)-1], uMsg)
+
+	if isWarning {
+		c.nid.DwInfoFlags = NIIF_WARN
+	} else {
+		c.nid.DwInfoFlags = NIIF_INFO
+	}
+	procPostMessageW.Call(uintptr(c.hwnd), WM_SHOW_BALLOON, 0, 0)
 }
 
 func setTipText(nid *notifyIconDataW, text string) {
@@ -576,6 +626,21 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 						formatSpeedBits(snap.TotalTxBps),
 					)
 					setTipText(&c.nid, tip)
+
+					// Dynamic activity icon state (> 1 KB/s threshold)
+					rxActive := snap.TotalRxBps > 1024
+					txActive := snap.TotalTxBps > 1024
+					switch {
+					case rxActive && txActive:
+						c.nid.HIcon = c.hIconBoth
+					case rxActive:
+						c.nid.HIcon = c.hIconRx
+					case txActive:
+						c.nid.HIcon = c.hIconTx
+					default:
+						c.nid.HIcon = c.hIconIdle
+					}
+
 					if c.hwnd != 0 {
 						procPostMessageW.Call(uintptr(c.hwnd), WM_UPDATE_TIP, 0, 0)
 					}

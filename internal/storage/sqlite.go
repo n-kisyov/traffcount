@@ -14,14 +14,19 @@ import (
 
 // Settings holds persistent user preferences.
 type Settings struct {
-	Theme          string `json:"theme"`          // "dark" (default) or "light"
-	AlwaysOnTop    bool   `json:"alwaysOnTop"`    // Keep GUI window on top
-	StartOnBoot    bool   `json:"startOnBoot"`    // Start minimized to tray on system boot
-	StartMinimized bool   `json:"startMinimized"` // Start minimized to tray when launched manually
-	SpeedUnit      string `json:"speedUnit"`      // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
-	HideLoopback   bool   `json:"hideLoopback"`   // Hide Loopback / tunnel adapters
-	RetentionDays  int    `json:"retentionDays"`  // How many days of history to keep (default 365)
-	RefreshRateMs  int    `json:"refreshRateMs"`  // Default 1000ms
+	Theme          string  `json:"theme"`          // "dark" (default), "antigravity", "nord", "dracula", "emerald", "light"
+	AlwaysOnTop    bool    `json:"alwaysOnTop"`    // Keep GUI window on top
+	StartOnBoot    bool    `json:"startOnBoot"`    // Start minimized to tray on system boot
+	StartMinimized bool    `json:"startMinimized"` // Start minimized to tray when launched manually
+	SpeedUnit      string  `json:"speedUnit"`      // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
+	HideLoopback   bool    `json:"hideLoopback"`   // Hide Loopback / tunnel adapters
+	RetentionDays  int     `json:"retentionDays"`  // How many days of history to keep (default 365)
+	RefreshRateMs  int     `json:"refreshRateMs"`  // Default 1000ms
+	DataCapEnabled bool    `json:"dataCapEnabled"` // Enable monthly/billing-cycle data cap
+	DataCapGB      float64 `json:"dataCapGB"`      // Monthly data cap in GB (e.g. 500)
+	DataCapIface   string  `json:"dataCapIface"`   // "all" or specific NIC ID
+	BillingDay     int     `json:"billingDay"`     // Day of month (1-28) when billing cycle resets
+	SpikeAlertMbps float64 `json:"spikeAlertMbps"` // Alert when sustained speed exceeds this Mbps (0 = disabled)
 }
 
 // WindowBounds stores the last screen coordinates and size of the dashboard window.
@@ -61,12 +66,17 @@ func isValidTheme(t string) bool {
 // DefaultSettings returns default app settings (Dark mode default).
 func DefaultSettings() Settings {
 	return Settings{
-		Theme:         "dark",
-		AlwaysOnTop:   false,
-		SpeedUnit:     "bits",
-		HideLoopback:  true,
-		RetentionDays: 365,
-		RefreshRateMs: 1000,
+		Theme:          "dark",
+		AlwaysOnTop:    false,
+		SpeedUnit:      "bits",
+		HideLoopback:   true,
+		RetentionDays:  365,
+		RefreshRateMs:  1000,
+		DataCapEnabled: false,
+		DataCapGB:      500,
+		DataCapIface:   "all",
+		BillingDay:     1,
+		SpikeAlertMbps: 0,
 	}
 }
 
@@ -218,6 +228,15 @@ func (s *Store) GetSettings() (Settings, error) {
 	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {
 		cfg.SpeedUnit = "bits"
 	}
+	if cfg.BillingDay < 1 || cfg.BillingDay > 28 {
+		cfg.BillingDay = 1
+	}
+	if cfg.DataCapIface == "" {
+		cfg.DataCapIface = "all"
+	}
+	if cfg.DataCapGB <= 0 {
+		cfg.DataCapGB = 500
+	}
 	return cfg, nil
 }
 
@@ -234,6 +253,15 @@ func (s *Store) SaveSettings(cfg Settings) error {
 	}
 	if cfg.RetentionDays <= 0 {
 		cfg.RetentionDays = 365
+	}
+	if cfg.BillingDay < 1 || cfg.BillingDay > 28 {
+		cfg.BillingDay = 1
+	}
+	if cfg.DataCapIface == "" {
+		cfg.DataCapIface = "all"
+	}
+	if cfg.DataCapGB <= 0 {
+		cfg.DataCapGB = 500
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
