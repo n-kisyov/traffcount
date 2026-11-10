@@ -70,6 +70,7 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/api/window/mini", s.handleWindowMini)
 	mux.HandleFunc("/api/window/bounds", s.handleWindowBounds)
 	mux.HandleFunc("/api/service", s.handleService)
+	mux.HandleFunc("/api/server/release", s.handleServerRelease)
 	mux.HandleFunc("/ws", s.handleWS)
 
 	webRoot, _ := fs.Sub(embeddedWeb, "web")
@@ -90,6 +91,21 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 // Start begins listening and serving until ctx is canceled.
 func (s *Server) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.addr)
+	if err != nil && service.IsWindowsServiceProcess() {
+		// If TraffCountService was started directly (e.g. via services.msc or sc start)
+		// while the standalone app holds port 9876, ask the standalone app to release it.
+		client := &http.Client{Timeout: 400 * time.Millisecond}
+		if resp, rErr := client.Post("http://"+s.addr+"/api/server/release", "application/json", nil); rErr == nil {
+			resp.Body.Close()
+		}
+		for i := 0; i < 25; i++ {
+			time.Sleep(100 * time.Millisecond)
+			ln, err = net.Listen("tcp", s.addr)
+			if err == nil {
+				break
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -115,11 +131,32 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
+	src := "app"
+	if service.IsWindowsServiceProcess() {
+		src = "service"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"app":     "traffcount",
 		"version": "1.1.0",
+		"source":  src,
 	})
+}
+
+func (s *Server) handleServerRelease(w http.ResponseWriter, r *http.Request) {
+	if service.IsWindowsServiceProcess() {
+		writeJSON(w, http.StatusOK, map[string]any{"released": false, "reason": "service"})
+		return
+	}
+	s.collector.FlushToDB()
+	writeJSON(w, http.StatusOK, map[string]any{"released": true})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		tray.NotifyTrayReleaseServer()
+	}()
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
