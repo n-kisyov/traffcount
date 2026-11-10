@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TraffCount — Network Monitor</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon" />
-  <link rel="stylesheet" href="/style.css?v=10" />
+  <link rel="stylesheet" href="/style.css?v=11" />
 </head>
 <body>
   <div class="app-shell">
@@ -168,6 +168,43 @@
           </div>
         </div>
 
+        <!-- Built-In Speed Test & Bufferbloat Latency Check Card -->
+        <div class="table-card speedtest-card">
+          <div class="speedtest-bar">
+            <div class="speedtest-title-group">
+              <h3>Speed &amp; Bufferbloat Diagnostics</h3>
+              <span class="speedtest-sub" id="stStatusText">Cloudflare Anycast — Unloaded vs. Loaded Latency &amp; Throughput</span>
+            </div>
+            <div class="speedtest-metrics">
+              <div class="st-metric">
+                <span class="st-label">DOWNLOAD</span>
+                <strong id="stDownMbps">— Mbps</strong>
+              </div>
+              <div class="st-metric">
+                <span class="st-label">UPLOAD</span>
+                <strong id="stUpMbps">— Mbps</strong>
+              </div>
+              <div class="st-metric">
+                <span class="st-label">UNLOADED PING</span>
+                <strong id="stUnloadedPing">— ms</strong>
+              </div>
+              <div class="st-metric">
+                <span class="st-label">LOADED PING</span>
+                <strong id="stLoadedPing">— ms</strong>
+              </div>
+              <div class="st-metric">
+                <span class="st-label">JITTER</span>
+                <strong id="stJitter">— ms</strong>
+              </div>
+              <div class="st-metric">
+                <span class="st-label">BUFFERBLOAT</span>
+                <strong id="stGradeBadge" class="st-grade-badge">—</strong>
+              </div>
+            </div>
+            <button id="btnRunSpeedTest" class="btn-primary btn-sm">Run Speed Test</button>
+          </div>
+        </div>
+
         <!-- Live Network Connections & Active Processes Inspector -->
         <div class="table-card connections-card">
           <div class="conn-header-bar">
@@ -219,11 +256,12 @@
                   <th>Proto</th>
                   <th>Local Endpoint</th>
                   <th>Remote Endpoint</th>
-                  <th>Host / Provider</th>
+                  <th>Host / Geo / ISP</th>
                   <th>Service</th>
                   <th class="num">RTT</th>
                   <th class="num">Traffic (In / Out)</th>
                   <th>State</th>
+                  <th class="num">Action</th>
                 </tr>
               </thead>
               <tbody id="connTableBody"></tbody>
@@ -240,6 +278,7 @@
                   <th class="num">Established</th>
                   <th class="num">Listening</th>
                   <th class="num">Total Sockets</th>
+                  <th class="num">Actions</th>
                 </tr>
               </thead>
               <tbody id="connProcTableBody"></tbody>
@@ -353,6 +392,27 @@
                 </tr>
               </thead>
               <tbody id="historyIfaceTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <div class="table-card-header">
+            <h3>Top Applications by Traffic Volume (Historical)</h3>
+          </div>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Application</th>
+                  <th>Executable Path</th>
+                  <th class="num">Inbound</th>
+                  <th class="num">Outbound</th>
+                  <th class="num">Total Traffic</th>
+                  <th style="width:160px">Share</th>
+                </tr>
+              </thead>
+              <tbody id="historyProcTableBody"></tbody>
             </table>
           </div>
         </div>
@@ -503,13 +563,40 @@
               </div>
               <input type="number" id="inputSpikeMbps" class="input-control" style="width:110px" min="0" max="100000" step="10" value="0" />
             </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">New Application Network Access Alert</div>
+                <div class="setting-hint">Show a Windows 11 tray notification when a new .exe accesses the network for the first time.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkNewAppAlert" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <h3>Database &amp; Maintenance</h3>
+            <p class="settings-desc">
+              Download a full SQLite snapshot of your historical traffic database or clear accumulated traffic counters.
+            </p>
+
+            <div class="service-actions">
+              <button id="btnBackupDB" class="btn-secondary">Download Database Backup (.db)</button>
+              <button id="btnResetDB" class="btn-danger">Reset Traffic History</button>
+            </div>
+
+            <div class="settings-note" id="dbActionStatus">
+              Database is automatically compacted and pruned according to your retention period (365 days).
+            </div>
           </div>
         </div>
       </section>
     </main>
   </div>
 
-  <script src="/app.js?v=10"></script>
+  <script src="/app.js?v=11"></script>
 </body>
 </html>
 

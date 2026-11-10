@@ -17,6 +17,7 @@
       dataCapIface: "all",
       billingDay: 1,
       spikeAlertMbps: 0,
+      newAppAlertEnabled: false,
     },
     miniMode: false,
     latestRealtime: null,
@@ -114,8 +115,19 @@
   const histPeriodLabelEl = document.getElementById("histPeriodLabel");
   const histGranularityLabelEl = document.getElementById("histGranularityLabel");
   const historyIfaceTableBody = document.getElementById("historyIfaceTableBody");
+  const historyProcTableBody = document.getElementById("historyProcTableBody");
   const histCanvas = document.getElementById("historyCanvas");
   const histTooltip = document.getElementById("histTooltip");
+
+  // Speed Test DOM
+  const btnRunSpeedTest = document.getElementById("btnRunSpeedTest");
+  const stStatusText = document.getElementById("stStatusText");
+  const stDownMbps = document.getElementById("stDownMbps");
+  const stUpMbps = document.getElementById("stUpMbps");
+  const stUnloadedPing = document.getElementById("stUnloadedPing");
+  const stLoadedPing = document.getElementById("stLoadedPing");
+  const stJitter = document.getElementById("stJitter");
+  const stGradeBadge = document.getElementById("stGradeBadge");
 
   // Settings DOM
   const themeButtons = document.querySelectorAll("#themeSelector .seg-btn");
@@ -128,6 +140,10 @@
   const inputDataCapGB = document.getElementById("inputDataCapGB");
   const inputBillingDay = document.getElementById("inputBillingDay");
   const inputSpikeMbps = document.getElementById("inputSpikeMbps");
+  const chkNewAppAlert = document.getElementById("chkNewAppAlert");
+  const btnBackupDB = document.getElementById("btnBackupDB");
+  const btnResetDB = document.getElementById("btnResetDB");
+  const dbActionStatus = document.getElementById("dbActionStatus");
   const svcStateText = document.getElementById("svcStateText");
   const svcBadge = document.getElementById("svcBadge");
 
@@ -202,6 +218,7 @@
     if (inputDataCapGB) inputDataCapGB.value = state.settings.dataCapGB || 500;
     if (inputBillingDay) inputBillingDay.value = state.settings.billingDay || 1;
     if (inputSpikeMbps) inputSpikeMbps.value = state.settings.spikeAlertMbps || 0;
+    if (chkNewAppAlert) chkNewAppAlert.checked = !!state.settings.newAppAlertEnabled;
     btnStayOnTop.classList.toggle("pinned", !!state.settings.alwaysOnTop);
 
     renderRealtimeView();
@@ -310,6 +327,73 @@
     inputSpikeMbps.addEventListener("change", (e) => {
       const val = Math.max(0, parseFloat(e.target.value) || 0);
       saveSettings({ spikeAlertMbps: val });
+    });
+  }
+
+  if (chkNewAppAlert) {
+    chkNewAppAlert.addEventListener("change", (e) => {
+      saveSettings({ newAppAlertEnabled: e.target.checked });
+    });
+  }
+
+  if (btnBackupDB) {
+    btnBackupDB.addEventListener("click", () => {
+      window.location.href = "/api/db/backup";
+    });
+  }
+
+  if (btnResetDB) {
+    btnResetDB.addEventListener("click", async () => {
+      if (!confirm("Are you sure you want to clear all historical traffic counters?")) {
+        return;
+      }
+      try {
+        const res = await fetch("/api/db/reset", { method: "POST" });
+        if (res.ok && dbActionStatus) {
+          dbActionStatus.textContent = "All historical traffic counters have been reset.";
+        }
+      } catch (e) {
+        console.error("Failed to reset DB:", e);
+      }
+    });
+  }
+
+  if (btnRunSpeedTest) {
+    btnRunSpeedTest.addEventListener("click", async () => {
+      btnRunSpeedTest.disabled = true;
+      btnRunSpeedTest.textContent = "Testing...";
+      if (stStatusText) {
+        stStatusText.textContent = "Running download, upload, and loaded latency bufferbloat checks...";
+      }
+      try {
+        const res = await fetch("/api/speedtest", { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          if (stDownMbps) stDownMbps.textContent = `${(data.downloadMbps || 0).toFixed(1)} Mbps`;
+          if (stUpMbps) stUpMbps.textContent = `${(data.uploadMbps || 0).toFixed(1)} Mbps`;
+          if (stUnloadedPing) stUnloadedPing.textContent = `${(data.unloadedPingMs || 0).toFixed(1)} ms`;
+          if (stLoadedPing) stLoadedPing.textContent = `${(data.loadedPingMs || 0).toFixed(1)} ms`;
+          if (stJitter) stJitter.textContent = `${(data.jitterMs || 0).toFixed(1)} ms`;
+          if (stGradeBadge) {
+            const g = data.bufferbloatGrade || "—";
+            stGradeBadge.textContent = g;
+            stGradeBadge.classList.remove("grade-good", "grade-warn", "grade-bad");
+            if (g === "A+" || g === "A") stGradeBadge.classList.add("grade-good");
+            else if (g === "B") stGradeBadge.classList.add("grade-warn");
+            else if (g === "C" || g === "D") stGradeBadge.classList.add("grade-bad");
+          }
+          if (stStatusText) {
+            stStatusText.textContent = data.error
+              ? `Error: ${data.error}`
+              : `Completed at ${new Date().toLocaleTimeString()} via ${data.serverLabel || "Cloudflare Anycast"}`;
+          }
+        }
+      } catch (e) {
+        if (stStatusText) stStatusText.textContent = "Speed test request failed.";
+      } finally {
+        btnRunSpeedTest.disabled = false;
+        btnRunSpeedTest.textContent = "Run Speed Test";
+      }
     });
   }
 
@@ -638,19 +722,24 @@
         );
       }
       if (procs.length === 0) {
-        connProcTableBody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:18px;">No matching processes with active sockets.</td></tr>`;
+        connProcTableBody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:18px;">No matching processes with active sockets.</td></tr>`;
         return;
       }
       connProcTableBody.innerHTML = procs
         .map((p) => {
           const initial = (p.processName || "?").charAt(0).toUpperCase();
           const totBytes = (p.totalRx || 0) + (p.totalTx || 0);
+          const blockedBadge = p.blocked ? `<span class="fw-badge">BLOCKED</span>` : "";
+          const blockBtnLabel = p.blocked ? "Unblock FW" : "Block FW";
+          const blockBtnCls = p.blocked ? "tbl-btn active-block" : "tbl-btn";
+          const canKill = p.pid > 4;
           return `
           <tr style="cursor:pointer" data-proc-filter="${escapeHtml(p.processName)}">
             <td>
               <div class="proc-cell">
                 <span class="proc-badge">${escapeHtml(initial)}</span>
-                <span>${escapeHtml(p.processName)}</span>
+                <span title="${escapeHtml(p.exePath || p.processName)}">${escapeHtml(p.processName)}</span>
+                ${blockedBadge}
               </div>
             </td>
             <td><code>${p.pid}</code></td>
@@ -660,10 +749,68 @@
             <td class="num" style="color:var(--success);font-weight:600">${p.established}</td>
             <td class="num" style="color:var(--accent-primary)">${p.listening}</td>
             <td class="num"><strong>${p.total}</strong></td>
+            <td class="num">
+              <div class="tbl-actions">
+                <button class="${blockBtnCls}" data-fw-proc="${escapeHtml(p.processName)}" data-fw-exe="${escapeHtml(p.exePath || "")}" data-fw-blocked="${p.blocked ? "1" : "0"}" title="Block or unblock application in Windows Defender Firewall">${blockBtnLabel}</button>
+                ${canKill ? `<button class="tbl-btn danger" data-kill-pid="${p.pid}" data-kill-name="${escapeHtml(p.processName)}" title="Terminate process PID ${p.pid}">Kill</button>` : ""}
+              </div>
+            </td>
           </tr>
         `;
         })
         .join("");
+
+      connProcTableBody.querySelectorAll("button[data-fw-proc]").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const processName = btn.dataset.fwProc;
+          const exePath = btn.dataset.fwExe;
+          const currentlyBlocked = btn.dataset.fwBlocked === "1";
+          btn.disabled = true;
+          try {
+            const res = await fetch("/api/firewall/block", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                processName,
+                exePath,
+                blocked: !currentlyBlocked,
+              }),
+            });
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              alert(errData.error || "Failed to update Windows Firewall rule.");
+            }
+            fetchConnections();
+          } catch (err) {
+            alert("Failed to update firewall rule.");
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      });
+
+      connProcTableBody.querySelectorAll("button[data-kill-pid]").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const pid = parseInt(btn.dataset.killPid, 10);
+          const name = btn.dataset.killName;
+          if (!confirm(`Terminate process ${name} (PID ${pid})?`)) return;
+          btn.disabled = true;
+          try {
+            const res = await fetch("/api/connections/action", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "kill_process", pid }),
+            });
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              alert(errData.error || "Failed to terminate process.");
+            }
+            fetchConnections();
+          } catch (_) {}
+        });
+      });
 
       connProcTableBody.querySelectorAll("tr[data-proc-filter]").forEach((tr) => {
         tr.addEventListener("click", () => {
@@ -692,6 +839,7 @@
           (c.localAddr && c.localAddr.toLowerCase().includes(q)) ||
           (c.remoteAddr && c.remoteAddr.toLowerCase().includes(q)) ||
           (c.remoteHost && c.remoteHost.toLowerCase().includes(q)) ||
+          (c.geoLabel && c.geoLabel.toLowerCase().includes(q)) ||
           (c.state && c.state.toLowerCase().includes(q)) ||
           String(c.pid).includes(q)
       );
@@ -699,7 +847,7 @@
 
     const displayList = list.slice(0, 250);
     if (displayList.length === 0) {
-      connTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:18px;">No matching network connections.</td></tr>`;
+      connTableBody.innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--text-muted);padding:18px;">No matching network connections.</td></tr>`;
       return;
     }
 
@@ -718,27 +866,63 @@
             ? `↓ ${formatBytes(c.rxBytes)} / ↑ ${formatBytes(c.txBytes)}`
             : "—";
 
+        const geoBadge = c.countryCode ? `<span class="geo-badge">${escapeHtml(c.countryCode)}</span>` : "";
+        const hostDisplay = c.remoteHost || c.geoLabel || "—";
+        const hostTooltip = [c.remoteHost, c.geoLabel].filter(Boolean).join(" — ");
+        const canCloseSocket = c.protocol === "TCP" && c.state === "ESTABLISHED";
+
         return `
         <tr>
           <td>
             <div class="proc-cell">
               <span class="proc-badge">${escapeHtml(initial)}</span>
-              <span>${escapeHtml(c.processName)}</span>
+              <span title="${escapeHtml(c.exePath || c.processName)}">${escapeHtml(c.processName)}</span>
             </div>
           </td>
           <td><code>${c.pid}</code></td>
           <td><code>${escapeHtml(c.protocol)}</code></td>
           <td><code>${escapeHtml(c.localAddr)}</code></td>
           <td><code>${escapeHtml(c.remoteAddr)}</code></td>
-          <td><span class="host-tag" title="${escapeHtml(c.remoteHost || "")}">${escapeHtml(c.remoteHost || "—")}</span></td>
+          <td>${geoBadge}<span class="host-tag" title="${escapeHtml(hostTooltip)}">${escapeHtml(hostDisplay)}</span></td>
           <td><span class="svc-tag">${escapeHtml(svc)}</span></td>
           <td class="num"><code>${rttTxt}</code></td>
           <td class="num" style="font-size:11.5px;color:var(--text-secondary)">${trafficTxt}</td>
           <td><span class="state-badge ${badgeCls}">${escapeHtml(c.state)}</span></td>
+          <td class="num">
+            ${
+              canCloseSocket
+                ? `<button class="tbl-btn danger" data-close-lip="${escapeHtml(c.localIP)}" data-close-lport="${c.localPort}" data-close-rip="${escapeHtml(c.remoteIP)}" data-close-rport="${c.remotePort}" title="Drop TCP connection">Close</button>`
+                : "—"
+            }
+          </td>
         </tr>
       `;
       })
       .join("");
+
+    connTableBody.querySelectorAll("button[data-close-lip]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const res = await fetch("/api/connections/action", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "close_socket",
+              localIP: btn.dataset.closeLip,
+              localPort: parseInt(btn.dataset.closeLport, 10),
+              remoteIP: btn.dataset.closeRip,
+              remotePort: parseInt(btn.dataset.closeRport, 10),
+            }),
+          });
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            alert(errData.error || "Failed to close TCP socket.");
+          }
+          fetchConnections();
+        } catch (_) {}
+      });
+    });
   }
 
   function niceCeiling(maxBytesPerSec) {
@@ -1094,31 +1278,67 @@
     const byIface = report.byInterface || [];
     if (byIface.length === 0) {
       historyIfaceTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:18px;">No traffic recorded for this period yet.</td></tr>`;
-      return;
+    } else {
+      historyIfaceTableBody.innerHTML = byIface
+        .map(
+          (item) => `
+        <tr>
+          <td><strong>${escapeHtml(item.name)}</strong></td>
+          <td>${escapeHtml(item.description || "—")}</td>
+          <td><code>${escapeHtml(item.mac || "—")}</code></td>
+          <td class="num" style="color:var(--rx-color)">${formatBytes(item.rxBytes)}</td>
+          <td class="num" style="color:var(--tx-color)">${formatBytes(item.txBytes)}</td>
+          <td class="num"><strong>${formatBytes(item.totalBytes)}</strong></td>
+          <td>
+            <div class="share-bar-wrap">
+              <div class="share-bar">
+                <div class="share-bar-fill" style="width:${Math.min(item.sharePct || 0, 100).toFixed(1)}%"></div>
+              </div>
+              <span style="font-size:11.5px;min-width:40px;text-align:right">${(item.sharePct || 0).toFixed(1)}%</span>
+            </div>
+          </td>
+        </tr>
+      `
+        )
+        .join("");
     }
 
-    historyIfaceTableBody.innerHTML = byIface
-      .map(
-        (item) => `
-      <tr>
-        <td><strong>${escapeHtml(item.name)}</strong></td>
-        <td>${escapeHtml(item.description || "—")}</td>
-        <td><code>${escapeHtml(item.mac || "—")}</code></td>
-        <td class="num" style="color:var(--rx-color)">${formatBytes(item.rxBytes)}</td>
-        <td class="num" style="color:var(--tx-color)">${formatBytes(item.txBytes)}</td>
-        <td class="num"><strong>${formatBytes(item.totalBytes)}</strong></td>
-        <td>
-          <div class="share-bar-wrap">
-            <div class="share-bar">
-              <div class="share-bar-fill" style="width:${Math.min(item.sharePct || 0, 100).toFixed(1)}%"></div>
-            </div>
-            <span style="font-size:11.5px;min-width:40px;text-align:right">${(item.sharePct || 0).toFixed(1)}%</span>
-          </div>
-        </td>
-      </tr>
-    `
-      )
-      .join("");
+    if (historyProcTableBody) {
+      const byProc = report.byProcess || [];
+      if (byProc.length === 0) {
+        historyProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">No per-application traffic recorded for this period yet.</td></tr>`;
+      } else {
+        historyProcTableBody.innerHTML = byProc
+          .map((p) => {
+            const initial = (p.processName || "?").charAt(0).toUpperCase();
+            const blockedBadge = p.blocked ? `<span class="fw-badge">BLOCKED</span>` : "";
+            return `
+            <tr>
+              <td>
+                <div class="proc-cell">
+                  <span class="proc-badge">${escapeHtml(initial)}</span>
+                  <strong>${escapeHtml(p.processName)}</strong>
+                  ${blockedBadge}
+                </div>
+              </td>
+              <td><code style="font-size:11px;color:var(--text-muted)">${escapeHtml(p.exePath || "—")}</code></td>
+              <td class="num" style="color:var(--rx-color)">${formatBytes(p.rxBytes)}</td>
+              <td class="num" style="color:var(--tx-color)">${formatBytes(p.txBytes)}</td>
+              <td class="num"><strong>${formatBytes(p.totalBytes)}</strong></td>
+              <td>
+                <div class="share-bar-wrap">
+                  <div class="share-bar">
+                    <div class="share-bar-fill" style="width:${Math.min(p.sharePct || 0, 100).toFixed(1)}%"></div>
+                  </div>
+                  <span style="font-size:11.5px;min-width:40px;text-align:right">${(p.sharePct || 0).toFixed(1)}%</span>
+                </div>
+              </td>
+            </tr>
+          `;
+          })
+          .join("");
+      }
+    }
   }
 
   function drawHistoryChart(report) {

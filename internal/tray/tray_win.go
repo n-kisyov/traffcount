@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -705,6 +706,22 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 					}
 				}
 				qResp.Body.Close()
+			}
+
+			// Check for newly discovered network applications
+			naResp, naErr := client.Get(c.opts.DashboardURL + "/api/alerts/new-apps")
+			if naErr == nil && naResp.StatusCode == http.StatusOK {
+				var na struct {
+					NewApps []string `json:"newApps"`
+				}
+				if json.NewDecoder(naResp.Body).Decode(&na) == nil && len(na.NewApps) > 0 {
+					c.ShowBalloonNotification(
+						"TraffCount — New App Network Activity",
+						fmt.Sprintf("First-time network access detected: %s", strings.Join(na.NewApps, ", ")),
+						false,
+					)
+				}
+				naResp.Body.Close()
 			}
 
 			resp, err := client.Get(c.opts.DashboardURL + "/api/realtime")

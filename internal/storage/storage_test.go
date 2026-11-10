@@ -150,5 +150,81 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 	if repEth.TotalRxBytes != wantEthRx {
 		t.Errorf("30d Ethernet rx mismatch: got %d, want %d", repEth.TotalRxBytes, wantEthRx)
 	}
+
+	// 7. Test Per-Process Traffic Recording, New App Detection, and Firewall Blocked Persistence
+	newApps, err := store.RecordProcessTrafficBatch([]ProcessTrafficDelta{
+		{
+			ProcessName: "chrome.exe",
+			ExePath:     `C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			RxBytes:     250 * 1024 * 1024,
+			TxBytes:     25 * 1024 * 1024,
+			Timestamp:   day1Ago,
+		},
+		{
+			ProcessName: "code.exe",
+			ExePath:     `C:\Users\dev\AppData\Local\Programs\Microsoft VS Code\Code.exe`,
+			RxBytes:     120 * 1024 * 1024,
+			TxBytes:     15 * 1024 * 1024,
+			Timestamp:   day1Ago,
+		},
+	})
+	if err != nil {
+		t.Fatalf("record process traffic: %v", err)
+	}
+	if len(newApps) != 0 {
+		t.Errorf("expected initial seed batch to return 0 alerts, got %v", newApps)
+	}
+
+	// Recording again with an existing app (chrome.exe) and a brand-new app (firefox.exe) should flag only firefox.exe
+	newApps2, err := store.RecordProcessTrafficBatch([]ProcessTrafficDelta{
+		{
+			ProcessName: "chrome.exe",
+			ExePath:     `C:\Program Files\Google\Chrome\Application\chrome.exe`,
+			RxBytes:     50 * 1024 * 1024,
+			TxBytes:     5 * 1024 * 1024,
+			Timestamp:   now,
+		},
+		{
+			ProcessName: "firefox.exe",
+			ExePath:     `C:\Program Files\Mozilla Firefox\firefox.exe`,
+			RxBytes:     10 * 1024 * 1024,
+			TxBytes:     2 * 1024 * 1024,
+			Timestamp:   now,
+		},
+	})
+	if err != nil {
+		t.Fatalf("record process traffic 2: %v", err)
+	}
+	if len(newApps2) != 1 || newApps2[0] != "firefox.exe" {
+		t.Errorf("expected [firefox.exe] newly discovered on second batch, got %v", newApps2)
+	}
+
+	if err := store.SetAppBlocked("code.exe", `C:\Users\dev\AppData\Local\Programs\Microsoft VS Code\Code.exe`, true); err != nil {
+		t.Fatalf("set app blocked: %v", err)
+	}
+	blockedMap, err := store.GetBlockedApps()
+	if err != nil || !blockedMap["code.exe"] {
+		t.Errorf("expected code.exe to be blocked, got map=%v err=%v", blockedMap, err)
+	}
+
+	repWithProcs, err := store.QueryHistory(start14, now, "all")
+	if err != nil {
+		t.Fatalf("query history with procs: %v", err)
+	}
+	if len(repWithProcs.ByProcess) != 3 || repWithProcs.ByProcess[0].ProcessName != "chrome.exe" {
+		t.Errorf("unexpected ByProcess breakdown: %+v", repWithProcs.ByProcess)
+	}
+
+	// 8. Test ResetTrafficHistory
+	if err := store.ResetTrafficHistory(); err != nil {
+		t.Fatalf("reset traffic history: %v", err)
+	}
+	repAfterReset, err := store.QueryHistory(start30, now, "all")
+	if err != nil {
+		t.Fatalf("query after reset: %v", err)
+	}
+	if repAfterReset.CombinedBytes != 0 || len(repAfterReset.ByProcess) != 0 {
+		t.Errorf("expected 0 traffic after reset, got combined=%d procs=%d", repAfterReset.CombinedBytes, len(repAfterReset.ByProcess))
+	}
 }
 
