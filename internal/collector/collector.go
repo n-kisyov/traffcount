@@ -43,11 +43,12 @@ type LiveInterfaceSnapshot struct {
 
 // RealtimePayload is broadcast every second to WebSocket subscribers and tray tooltip.
 type RealtimePayload struct {
-	Timestamp  int64                   `json:"timestamp"`
-	TotalRxBps uint64                  `json:"totalRxBps"`
-	TotalTxBps uint64                  `json:"totalTxBps"`
-	TotalHist  []RatePoint             `json:"totalHistory"`
-	Interfaces []LiveInterfaceSnapshot `json:"interfaces"`
+	Timestamp   int64                   `json:"timestamp"`
+	TotalRxBps  uint64                  `json:"totalRxBps"`
+	TotalTxBps  uint64                  `json:"totalTxBps"`
+	TotalHist   []RatePoint             `json:"totalHistory"`
+	Interfaces  []LiveInterfaceSnapshot `json:"interfaces"`
+	Diagnostics DiagnosticsStatus       `json:"diagnostics"`
 }
 
 type rawCounter struct {
@@ -138,13 +139,16 @@ func (c *Collector) LatestSnapshot() RealtimePayload {
 
 // Run starts the 1Hz polling loop and 30-second SQLite flush loop until ctx is canceled.
 func (c *Collector) Run(ctx context.Context) {
-	// Initial sample to seed counters
+	// Initial sample to seed counters and connectivity probe
+	go ProbeConnectivity()
 	c.sample(true)
 
 	pollTicker := time.NewTicker(1 * time.Second)
 	flushTicker := time.NewTicker(15 * time.Second)
+	diagTicker := time.NewTicker(3 * time.Second)
 	defer pollTicker.Stop()
 	defer flushTicker.Stop()
+	defer diagTicker.Stop()
 
 	for {
 		select {
@@ -156,6 +160,8 @@ func (c *Collector) Run(ctx context.Context) {
 			c.broadcast(payload)
 		case <-flushTicker.C:
 			c.FlushToDB()
+		case <-diagTicker.C:
+			go ProbeConnectivity()
 		}
 	}
 }
@@ -328,11 +334,12 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 	copy(totalHistCopy, c.totalHist)
 
 	payload := RealtimePayload{
-		Timestamp:  unixNow,
-		TotalRxBps: totalRxBps,
-		TotalTxBps: totalTxBps,
-		TotalHist:  totalHistCopy,
-		Interfaces: snapshots,
+		Timestamp:   unixNow,
+		TotalRxBps:  totalRxBps,
+		TotalTxBps:  totalTxBps,
+		TotalHist:   totalHistCopy,
+		Interfaces:  snapshots,
+		Diagnostics: LatestDiagnostics(),
 	}
 	c.lastPayload = payload
 	return payload
