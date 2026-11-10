@@ -4,6 +4,7 @@ package service
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,6 +313,11 @@ func StopService() error {
 func requestGracefulShutdown() error {
 	// Ask any running TraffCount tray instance to release its in-process HTTP server on port 9876
 	// (WITHOUT closing the system tray icon itself!) so TraffCountService can bind port 9876 cleanly.
+	client := &http.Client{Timeout: 400 * time.Millisecond}
+	if resp, err := client.Post("http://127.0.0.1:9876/api/server/release", "application/json", nil); err == nil {
+		resp.Body.Close()
+	}
+
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	procFindWindowW := user32.NewProc("FindWindowW")
 	procPostMessageW := user32.NewProc("PostMessageW")
@@ -320,8 +326,8 @@ func requestGracefulShutdown() error {
 	if hwnd != 0 {
 		const WM_RELEASE_SERVER = 0x0400 + 28
 		procPostMessageW.Call(hwnd, WM_RELEASE_SERVER, 0, 0)
-		time.Sleep(500 * time.Millisecond)
 	}
+	time.Sleep(400 * time.Millisecond)
 	return nil
 }
 
