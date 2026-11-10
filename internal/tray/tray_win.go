@@ -252,6 +252,21 @@ func NotifyTrayMiniMode(mini bool) bool {
 	return false
 }
 
+// NotifyTrayReleaseServer tells the running tray controller to release its in-process HTTP server on port 9876.
+func NotifyTrayReleaseServer() bool {
+	if activeController != nil && activeController.opts.OnReleaseServer != nil {
+		activeController.opts.OnReleaseServer()
+		return true
+	}
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		procPostMessageW.Call(hwnd, WM_RELEASE_SERVER, 0, 0)
+		return true
+	}
+	return false
+}
+
 // SignalExistingTrayInstance finds an already-running TraffCount tray hidden window and tells it to open/focus the dashboard.
 func SignalExistingTrayInstance() bool {
 	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
