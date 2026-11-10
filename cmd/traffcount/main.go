@@ -119,7 +119,7 @@ func main() {
 
 	releaseLocalServer := func() {
 		daemonMu.Lock()
-		pauseFallbackUntil = time.Now().Add(4 * time.Second)
+		pauseFallbackUntil = time.Now().Add(1800 * time.Millisecond)
 		if daemonCancel != nil {
 			daemonCancel()
 			daemonCancel = nil
@@ -151,7 +151,7 @@ func main() {
 			paused := time.Now().Before(pauseFallbackUntil)
 			daemonMu.Unlock()
 
-			if !paused && !isServerAlive(dashboardURL) {
+			if !paused && !isServerAlive(dashboardURL) && !service.QueryStatus().Running {
 				dCtx, dCancel := context.WithCancel(ctx)
 				daemonMu.Lock()
 				daemonCancel = dCancel
@@ -164,7 +164,7 @@ func main() {
 				})
 				dCancel()
 			}
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 	}()
 	if !alreadyRunning {
