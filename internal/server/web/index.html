@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TraffCount — Network Monitor</title>
-  <link rel="stylesheet" href="/style.css?v=5" />
+  <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+  <link rel="stylesheet" href="/style.css?v=9" />
 </head>
 <body>
   <div class="app-shell">
@@ -70,6 +71,14 @@
         </div>
 
         <div class="top-bar-actions">
+          <!-- Mini-Widget Floating Overlay Button -->
+          <button id="btnMiniWidget" class="action-pill" title="Switch to compact Always-on-Top Mini-Widget overlay">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><rect x="12" y="12" width="7" height="7" rx="1"/>
+            </svg>
+            <span id="miniWidgetLabel">Mini Widget</span>
+          </button>
+
           <!-- Stay on Top Pin Button -->
           <button id="btnStayOnTop" class="action-pill" title="Keep TraffCount window always on top of other windows">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
@@ -122,12 +131,13 @@
 
           <div class="kpi-card meta-card">
             <div class="kpi-header">
-              <span class="kpi-label">ADAPTER DETAILS</span>
+              <span class="kpi-label">ADAPTER &amp; CONNECTIVITY</span>
             </div>
             <div class="meta-rows">
               <div class="meta-row"><span>Link Speed:</span> <strong id="rtLinkSpeed">—</strong></div>
               <div class="meta-row"><span>IPv4 Address:</span> <strong id="rtIPv4">—</strong></div>
               <div class="meta-row"><span>MAC Address:</span> <strong id="rtMAC">—</strong></div>
+              <div class="meta-row"><span>Ping / Loss:</span> <strong id="rtPingBadges">—</strong></div>
             </div>
           </div>
         </div>
@@ -209,7 +219,10 @@
                   <th>Proto</th>
                   <th>Local Endpoint</th>
                   <th>Remote Endpoint</th>
+                  <th>Host / Provider</th>
                   <th>Service</th>
+                  <th class="num">RTT</th>
+                  <th class="num">Traffic (In / Out)</th>
                   <th>State</th>
                 </tr>
               </thead>
@@ -221,9 +234,11 @@
                 <tr>
                   <th>Application / Process</th>
                   <th>PID</th>
+                  <th class="num">Down Rate</th>
+                  <th class="num">Up Rate</th>
+                  <th class="num">Session Data</th>
                   <th class="num">Established</th>
-                  <th class="num">Listening Ports</th>
-                  <th class="num">Other / Wait</th>
+                  <th class="num">Listening</th>
                   <th class="num">Total Sockets</th>
                 </tr>
               </thead>
@@ -257,6 +272,26 @@
             <select id="historyIfaceSelect" class="select-control">
               <option value="all">All Network Interfaces (Total)</option>
             </select>
+
+            <button id="btnExportCSV" class="btn-secondary btn-sm" title="Export current traffic report to CSV">Export CSV</button>
+            <button id="btnExportJSON" class="btn-secondary btn-sm" title="Export current traffic report to JSON">Export JSON</button>
+          </div>
+        </div>
+
+        <!-- Monthly Data Cap / Quota Progress Banner -->
+        <div id="quotaBanner" class="quota-banner hidden">
+          <div class="quota-top">
+            <div>
+              <strong id="quotaTitle">Monthly Data Cap</strong>
+              <span id="quotaCycleText" class="quota-sub">Billing cycle</span>
+            </div>
+            <div class="quota-numbers">
+              <strong id="quotaUsedText">0 GB / 0 GB</strong>
+              <span id="quotaPctBadge" class="quota-pct-badge">0%</span>
+            </div>
+          </div>
+          <div class="quota-bar-track">
+            <div id="quotaBarFill" class="quota-bar-fill" style="width:0%"></div>
           </div>
         </div>
 
@@ -427,12 +462,54 @@
               <code>traffcount.exe service install</code> or <code>traffcount.exe service status</code>
             </div>
           </div>
+
+          <div class="settings-card">
+            <h3>Data Cap &amp; Bandwidth Alerts</h3>
+            <p class="settings-desc">
+              Configure a monthly billing-cycle data cap and sustained bandwidth spike alerts with Windows 11 system tray notifications.
+            </p>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Enable Monthly Data Cap</div>
+                <div class="setting-hint">Show billing-cycle quota progress bar and notify at 80% and 100% usage.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkDataCapEnabled" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Monthly Data Cap Limit (GB)</div>
+                <div class="setting-hint">Combined Inbound + Outbound quota per billing cycle.</div>
+              </div>
+              <input type="number" id="inputDataCapGB" class="input-control" style="width:110px" min="1" max="100000" step="1" value="500" />
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Billing Cycle Reset Day (1–28)</div>
+                <div class="setting-hint">Day of each month when the quota counter resets.</div>
+              </div>
+              <input type="number" id="inputBillingDay" class="input-control" style="width:90px" min="1" max="28" step="1" value="1" />
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Sustained Spike Alert Threshold (Mbps)</div>
+                <div class="setting-hint">Trigger a system tray alert when throughput exceeds this rate (0 = disabled).</div>
+              </div>
+              <input type="number" id="inputSpikeMbps" class="input-control" style="width:110px" min="0" max="100000" step="10" value="0" />
+            </div>
+          </div>
         </div>
       </section>
     </main>
   </div>
 
-  <script src="/app.js?v=8"></script>
+  <script src="/app.js?v=9"></script>
 </body>
 </html>
 

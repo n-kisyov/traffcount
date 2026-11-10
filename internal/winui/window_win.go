@@ -67,6 +67,7 @@ type Manager struct {
 	mu          sync.Mutex
 	url         string
 	alwaysOnTop bool
+	miniMode    bool
 	bounds      storage.WindowBounds
 	launching   bool
 }
@@ -99,6 +100,13 @@ func (m *Manager) GetSavedBounds() storage.WindowBounds {
 // CaptureLiveWindowBounds inspects any currently open normal (non-minimized) TraffCount window
 // on the desktop and updates m.bounds if found.
 func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
+	m.mu.Lock()
+	inMini := m.miniMode
+	m.mu.Unlock()
+	if inMini {
+		return storage.WindowBounds{}, false
+	}
+
 	hwnd := FindTraffCountWindow()
 	if hwnd == 0 {
 		return storage.WindowBounds{}, false
@@ -116,7 +124,7 @@ func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
 	}
 	w := int(r.Right - r.Left)
 	h := int(r.Bottom - r.Top)
-	if w < 400 || h < 300 {
+	if w < 450 || h < 320 {
 		return storage.WindowBounds{}, false
 	}
 
@@ -136,6 +144,54 @@ func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
 		}
 	}
 	return m.bounds, true
+}
+
+// IsMiniMode returns true if the window is currently in compact mini-widget overlay mode.
+func (m *Manager) IsMiniMode() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.miniMode
+}
+
+// SetMiniMode resizes the open TraffCount window into a compact 360x215 always-on-top mini-widget
+// or restores its normal saved bounds.
+func (m *Manager) SetMiniMode(mini bool) bool {
+	if mini {
+		m.CaptureLiveWindowBounds()
+	}
+	m.mu.Lock()
+	m.miniMode = mini
+	bounds := m.bounds
+	topmost := m.alwaysOnTop
+	m.mu.Unlock()
+
+	hwlist := FindAllTraffCountWindows(false)
+	for _, hwnd := range hwlist {
+		if mini {
+			zoomed, _, _ := procIsZoomed.Call(hwnd)
+			if zoomed != 0 {
+				procShowWindow.Call(hwnd, SW_RESTORE)
+			}
+			procSetWindowPos.Call(
+				hwnd,
+				HWND_TOPMOST,
+				0, 0,
+				uintptr(360),
+				uintptr(220),
+				SWP_NOMOVE|SWP_NOACTIVATE|SWP_FRAMECHANGED,
+			)
+		} else {
+			if bounds.Width < 450 {
+				bounds.Width = 1180
+			}
+			if bounds.Height < 320 {
+				bounds.Height = 780
+			}
+			applyWindowBounds(hwnd, bounds)
+			applyTopmost(hwnd, topmost)
+		}
+	}
+	return len(hwlist) > 0
 }
 
 // IsAlwaysOnTop returns the current "Stay on Top" setting.
@@ -173,13 +229,14 @@ func (m *Manager) InterceptMinimizeToTray() bool {
 func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 	m.mu.Lock()
 	m.alwaysOnTop = topmost
+	effectiveTop := topmost || m.miniMode
 	m.mu.Unlock()
 
 	hwlist := FindAllTraffCountWindows(true)
 	for _, hwnd := range hwlist {
 		isTop := isWindowTopmost(hwnd)
-		if isTop != topmost {
-			applyTopmost(hwnd, topmost)
+		if isTop != effectiveTop {
+			applyTopmost(hwnd, effectiveTop)
 		}
 	}
 }

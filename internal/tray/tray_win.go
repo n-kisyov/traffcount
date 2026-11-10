@@ -37,6 +37,7 @@ const (
 	WM_SET_STARTUP   = WM_USER + 24
 	WM_UPDATE_TIP    = WM_USER + 25
 	WM_SHOW_BALLOON  = WM_USER + 26
+	WM_SET_MINIMODE  = WM_USER + 27
 	WM_LBUTTONUP     = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
@@ -164,18 +165,20 @@ type Options struct {
 
 // Controller manages the Windows 11 System Tray icon and context menu.
 type Controller struct {
-	opts       Options
-	hwnd       windows.Handle
-	nid        notifyIconDataW
-	hIconIdle  windows.Handle
-	hIconRx    windows.Handle
-	hIconTx    windows.Handle
-	hIconBoth  windows.Handle
-	curIcon    windows.Handle
-	stayOnTop  bool
-	svcState   string
-	alerted80  bool
-	alerted100 bool
+	opts           Options
+	hwnd           windows.Handle
+	nid            notifyIconDataW
+	hIconIdle      windows.Handle
+	hIconRx        windows.Handle
+	hIconTx        windows.Handle
+	hIconBoth      windows.Handle
+	curIcon        windows.Handle
+	stayOnTop      bool
+	svcState       string
+	alerted80      bool
+	alerted100     bool
+	spikeTicks     int
+	lastSpikeAlert time.Time
 }
 
 var activeController *Controller
@@ -226,6 +229,21 @@ func NotifyTrayStartup(enable bool) bool {
 			wp = 1
 		}
 		procPostMessageW.Call(hwnd, WM_SET_STARTUP, wp, 0)
+		return true
+	}
+	return false
+}
+
+// NotifyTrayMiniMode sends a Win32 message to the interactive tray window to toggle mini-widget mode.
+func NotifyTrayMiniMode(mini bool) bool {
+	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
+	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+	if hwnd != 0 {
+		var wp uintptr
+		if mini {
+			wp = 1
+		}
+		procPostMessageW.Call(hwnd, WM_SET_MINIMODE, wp, 0)
 		return true
 	}
 	return false
@@ -391,6 +409,13 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case WM_SET_STARTUP:
 		enable := wParam != 0
 		_ = SetStartupEnabled(enable)
+		return 0
+
+	case WM_SET_MINIMODE:
+		mini := wParam != 0
+		if c != nil && c.opts.WinMgr != nil {
+			c.opts.WinMgr.SetMiniMode(mini)
+		}
 		return 0
 
 	case WM_CLOSE, WM_QUIT_APP:
@@ -593,13 +618,16 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 				}
 			}
 
+			var spikeAlertMbps float64
 			sResp, sErr := client.Get(c.opts.DashboardURL + "/api/settings")
 			if sErr == nil && sResp.StatusCode == http.StatusOK {
 				var cfg struct {
-					AlwaysOnTop bool `json:"alwaysOnTop"`
-					StartOnBoot bool `json:"startOnBoot"`
+					AlwaysOnTop    bool    `json:"alwaysOnTop"`
+					StartOnBoot    bool    `json:"startOnBoot"`
+					SpikeAlertMbps float64 `json:"spikeAlertMbps"`
 				}
 				if json.NewDecoder(sResp.Body).Decode(&cfg) == nil {
+					spikeAlertMbps = cfg.SpikeAlertMbps
 					if c.stayOnTop != cfg.AlwaysOnTop {
 						c.stayOnTop = cfg.AlwaysOnTop
 						if c.opts.WinMgr != nil {
@@ -617,6 +645,40 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 				c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
 			}
 
+			// Check Monthly Data Cap alerts
+			qResp, qErr := client.Get(c.opts.DashboardURL + "/api/quota")
+			if qErr == nil && qResp.StatusCode == http.StatusOK {
+				var qs struct {
+					Enabled bool    `json:"enabled"`
+					CapGB   float64 `json:"capGb"`
+					UsedPct float64 `json:"usedPct"`
+					Over80  bool    `json:"over80"`
+					Over100 bool    `json:"over100"`
+				}
+				if json.NewDecoder(qResp.Body).Decode(&qs) == nil && qs.Enabled {
+					if qs.Over100 && !c.alerted100 {
+						c.alerted100 = true
+						c.alerted80 = true
+						c.ShowBalloonNotification(
+							"TraffCount — Data Cap Exceeded (100%)",
+							fmt.Sprintf("Billing cycle traffic has reached %.1f%% of your %.1f GB limit.", qs.UsedPct, qs.CapGB),
+							true,
+						)
+					} else if qs.Over80 && !c.alerted80 {
+						c.alerted80 = true
+						c.ShowBalloonNotification(
+							"TraffCount — Data Cap Warning (80%)",
+							fmt.Sprintf("Billing cycle traffic has reached %.1f%% of your %.1f GB limit.", qs.UsedPct, qs.CapGB),
+							true,
+						)
+					} else if !qs.Over80 {
+						c.alerted80 = false
+						c.alerted100 = false
+					}
+				}
+				qResp.Body.Close()
+			}
+
 			resp, err := client.Get(c.opts.DashboardURL + "/api/realtime")
 			if err == nil && resp.StatusCode == http.StatusOK {
 				var snap collector.RealtimePayload
@@ -626,6 +688,26 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 						formatSpeedBits(snap.TotalTxBps),
 					)
 					setTipText(&c.nid, tip)
+
+					// Bandwidth spike anomaly check
+					if spikeAlertMbps > 0 {
+						curMbps := float64(snap.TotalRxBps+snap.TotalTxBps) * 8.0 / 1e6
+						if curMbps >= spikeAlertMbps {
+							c.spikeTicks++
+							if c.spikeTicks >= 2 && time.Since(c.lastSpikeAlert) > 5*time.Minute {
+								c.lastSpikeAlert = time.Now()
+								c.ShowBalloonNotification(
+									"TraffCount — Bandwidth Spike Alert",
+									fmt.Sprintf("Sustained throughput %.1f Mbps exceeded alert threshold (%.0f Mbps).", curMbps, spikeAlertMbps),
+									false,
+								)
+							}
+						} else {
+							c.spikeTicks = 0
+						}
+					} else {
+						c.spikeTicks = 0
+					}
 
 					// Dynamic activity icon state (> 1 KB/s threshold)
 					rxActive := snap.TotalRxBps > 1024

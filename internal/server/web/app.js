@@ -12,7 +12,13 @@
       hideLoopback: true,
       retentionDays: 365,
       refreshRateMs: 1000,
+      dataCapEnabled: false,
+      dataCapGB: 500,
+      dataCapIface: "all",
+      billingDay: 1,
+      spikeAlertMbps: 0,
     },
+    miniMode: false,
     latestRealtime: null,
     historyFilter: {
       period: "",
@@ -41,6 +47,8 @@
   const adapterListEl = document.getElementById("adapterList");
   const viewTitleEl = document.getElementById("viewTitle");
   const viewSubtitleEl = document.getElementById("viewSubtitle");
+  const btnMiniWidget = document.getElementById("btnMiniWidget");
+  const miniWidgetLabel = document.getElementById("miniWidgetLabel");
   const btnStayOnTop = document.getElementById("btnStayOnTop");
   const btnQuickTheme = document.getElementById("btnQuickTheme");
   const quickThemeLabel = document.getElementById("quickThemeLabel");
@@ -64,6 +72,7 @@
   const rtLinkSpeedEl = document.getElementById("rtLinkSpeed");
   const rtIPv4El = document.getElementById("rtIPv4");
   const rtMACEl = document.getElementById("rtMAC");
+  const rtPingBadgesEl = document.getElementById("rtPingBadges");
   const rtAdapterDescEl = document.getElementById("rtAdapterDesc");
   const rtScaleMaxEl = document.getElementById("rtScaleMax");
   const rtCanvas = document.getElementById("realtimeCanvas");
@@ -91,6 +100,13 @@
   const inputEndDate = document.getElementById("inputEndDate");
   const btnApplyDates = document.getElementById("btnApplyDates");
   const historyIfaceSelect = document.getElementById("historyIfaceSelect");
+  const btnExportCSV = document.getElementById("btnExportCSV");
+  const btnExportJSON = document.getElementById("btnExportJSON");
+  const quotaBanner = document.getElementById("quotaBanner");
+  const quotaCycleText = document.getElementById("quotaCycleText");
+  const quotaUsedText = document.getElementById("quotaUsedText");
+  const quotaPctBadge = document.getElementById("quotaPctBadge");
+  const quotaBarFill = document.getElementById("quotaBarFill");
   const histTotalRxEl = document.getElementById("histTotalRx");
   const histTotalTxEl = document.getElementById("histTotalTx");
   const histCombinedEl = document.getElementById("histCombined");
@@ -108,6 +124,10 @@
   const chkStartOnBoot = document.getElementById("chkStartOnBoot");
   const chkStartMinimized = document.getElementById("chkStartMinimized");
   const chkHideLoopback = document.getElementById("chkHideLoopback");
+  const chkDataCapEnabled = document.getElementById("chkDataCapEnabled");
+  const inputDataCapGB = document.getElementById("inputDataCapGB");
+  const inputBillingDay = document.getElementById("inputBillingDay");
+  const inputSpikeMbps = document.getElementById("inputSpikeMbps");
   const svcStateText = document.getElementById("svcStateText");
   const svcBadge = document.getElementById("svcBadge");
 
@@ -178,11 +198,16 @@
     if (chkStartOnBoot) chkStartOnBoot.checked = !!state.settings.startOnBoot;
     if (chkStartMinimized) chkStartMinimized.checked = !!state.settings.startMinimized;
     chkHideLoopback.checked = !!state.settings.hideLoopback;
+    if (chkDataCapEnabled) chkDataCapEnabled.checked = !!state.settings.dataCapEnabled;
+    if (inputDataCapGB) inputDataCapGB.value = state.settings.dataCapGB || 500;
+    if (inputBillingDay) inputBillingDay.value = state.settings.billingDay || 1;
+    if (inputSpikeMbps) inputSpikeMbps.value = state.settings.spikeAlertMbps || 0;
     btnStayOnTop.classList.toggle("pinned", !!state.settings.alwaysOnTop);
 
     renderRealtimeView();
     if (state.activeTab === "history" && state.historyReport) {
       drawHistoryChart(state.historyReport);
+      fetchQuotaStatus();
     }
   }
 
@@ -260,6 +285,58 @@
   chkHideLoopback.addEventListener("change", (e) => {
     saveSettings({ hideLoopback: e.target.checked });
   });
+
+  if (chkDataCapEnabled) {
+    chkDataCapEnabled.addEventListener("change", (e) => {
+      saveSettings({ dataCapEnabled: e.target.checked });
+    });
+  }
+
+  if (inputDataCapGB) {
+    inputDataCapGB.addEventListener("change", (e) => {
+      const val = Math.max(1, parseFloat(e.target.value) || 500);
+      saveSettings({ dataCapGB: val });
+    });
+  }
+
+  if (inputBillingDay) {
+    inputBillingDay.addEventListener("change", (e) => {
+      const val = Math.min(28, Math.max(1, parseInt(e.target.value, 10) || 1));
+      saveSettings({ billingDay: val });
+    });
+  }
+
+  if (inputSpikeMbps) {
+    inputSpikeMbps.addEventListener("change", (e) => {
+      const val = Math.max(0, parseFloat(e.target.value) || 0);
+      saveSettings({ spikeAlertMbps: val });
+    });
+  }
+
+  // Mini-Widget Floating Overlay Mode Toggle
+  if (btnMiniWidget) {
+    btnMiniWidget.addEventListener("click", async () => {
+      state.miniMode = !state.miniMode;
+      document.body.classList.toggle("mini-mode", state.miniMode);
+      btnMiniWidget.classList.toggle("pinned", state.miniMode);
+      if (miniWidgetLabel) {
+        miniWidgetLabel.textContent = state.miniMode ? "Full View" : "Mini Widget";
+      }
+      if (state.miniMode && state.activeTab !== "realtime") {
+        // Switch to realtime tab for the mini widget
+        const rtBtn = document.querySelector('.nav-item[data-tab="realtime"]');
+        if (rtBtn) rtBtn.click();
+      }
+      try {
+        await fetch("/api/window/mini", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mini: state.miniMode }),
+        });
+      } catch (_) {}
+      setTimeout(() => renderRealtimeView(), 120);
+    });
+  }
 
   // Quick Theme Button & Segmented Controls
   btnQuickTheme.addEventListener("click", () => {
@@ -341,6 +418,28 @@
     let selected = null;
     if (state.selectedIface !== "all") {
       selected = ifaces.find((x) => x.id === state.selectedIface) || null;
+    }
+
+    // Connectivity / Latency probes (1.1.1.1 & 8.8.8.8)
+    if (rtPingBadgesEl) {
+      const probes = payload.diagnostics?.probes || [];
+      if (probes.length === 0) {
+        rtPingBadgesEl.textContent = "Probing...";
+      } else {
+        rtPingBadgesEl.innerHTML = probes
+          .map((p) => {
+            if (!p.online) {
+              return `<span class="ping-badge bad" title="${escapeHtml(p.target)} (${escapeHtml(p.address)}) Offline">${escapeHtml(p.address)} Offline</span>`;
+            }
+            const ms = p.latencyMs ? p.latencyMs.toFixed(0) : "0";
+            let cls = "good";
+            if (p.latencyMs > 120 || p.lossPct > 10) cls = "bad";
+            else if (p.latencyMs > 55 || p.lossPct > 0) cls = "warn";
+            const lossTxt = p.lossPct > 0 ? ` (${p.lossPct.toFixed(0)}% loss)` : "";
+            return `<span class="ping-badge ${cls}" title="${escapeHtml(p.target)}: ${ms} ms${lossTxt}">${escapeHtml(p.address)}: ${ms}ms${lossTxt}</span>`;
+          })
+          .join("");
+      }
     }
 
     if (!selected) {
@@ -520,12 +619,13 @@
         );
       }
       if (procs.length === 0) {
-        connProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">No matching processes with active sockets.</td></tr>`;
+        connProcTableBody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:18px;">No matching processes with active sockets.</td></tr>`;
         return;
       }
       connProcTableBody.innerHTML = procs
         .map((p) => {
           const initial = (p.processName || "?").charAt(0).toUpperCase();
+          const totBytes = (p.totalRx || 0) + (p.totalTx || 0);
           return `
           <tr style="cursor:pointer" data-proc-filter="${escapeHtml(p.processName)}">
             <td>
@@ -535,9 +635,11 @@
               </div>
             </td>
             <td><code>${p.pid}</code></td>
+            <td class="num" style="color:var(--rx-color)">${formatRate(p.rxBps || 0)}</td>
+            <td class="num" style="color:var(--tx-color)">${formatRate(p.txBps || 0)}</td>
+            <td class="num">${formatBytes(totBytes)}</td>
             <td class="num" style="color:var(--success);font-weight:600">${p.established}</td>
             <td class="num" style="color:var(--accent-primary)">${p.listening}</td>
-            <td class="num">${p.other}</td>
             <td class="num"><strong>${p.total}</strong></td>
           </tr>
         `;
@@ -570,6 +672,7 @@
           (c.processName && c.processName.toLowerCase().includes(q)) ||
           (c.localAddr && c.localAddr.toLowerCase().includes(q)) ||
           (c.remoteAddr && c.remoteAddr.toLowerCase().includes(q)) ||
+          (c.remoteHost && c.remoteHost.toLowerCase().includes(q)) ||
           (c.state && c.state.toLowerCase().includes(q)) ||
           String(c.pid).includes(q)
       );
@@ -577,7 +680,7 @@
 
     const displayList = list.slice(0, 250);
     if (displayList.length === 0) {
-      connTableBody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:18px;">No matching network connections.</td></tr>`;
+      connTableBody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:18px;">No matching network connections.</td></tr>`;
       return;
     }
 
@@ -589,6 +692,12 @@
         if (c.state === "ESTABLISHED") badgeCls = "est";
         else if (c.state === "LISTEN") badgeCls = "listen";
         else if (c.state === "TIME_WAIT" || c.state === "CLOSE_WAIT") badgeCls = "wait";
+
+        const rttTxt = c.rttMs > 0 ? `${c.rttMs} ms` : "—";
+        const trafficTxt =
+          c.rxBytes > 0 || c.txBytes > 0
+            ? `↓ ${formatBytes(c.rxBytes)} / ↑ ${formatBytes(c.txBytes)}`
+            : "—";
 
         return `
         <tr>
@@ -602,7 +711,10 @@
           <td><code>${escapeHtml(c.protocol)}</code></td>
           <td><code>${escapeHtml(c.localAddr)}</code></td>
           <td><code>${escapeHtml(c.remoteAddr)}</code></td>
+          <td><span class="host-tag" title="${escapeHtml(c.remoteHost || "")}">${escapeHtml(c.remoteHost || "—")}</span></td>
           <td><span class="svc-tag">${escapeHtml(svc)}</span></td>
+          <td class="num"><code>${rttTxt}</code></td>
+          <td class="num" style="font-size:11.5px;color:var(--text-secondary)">${trafficTxt}</td>
           <td><span class="state-badge ${badgeCls}">${escapeHtml(c.state)}</span></td>
         </tr>
       `;
@@ -869,7 +981,7 @@
     fetchHistoryReport();
   });
 
-  async function fetchHistoryReport() {
+  function buildHistoryQueryParams() {
     const params = new URLSearchParams();
     params.set("iface", state.historyFilter.iface || "all");
     if (state.historyFilter.start && state.historyFilter.end) {
@@ -880,6 +992,62 @@
     } else {
       params.set("days", String(state.historyFilter.days || 14));
     }
+    return params;
+  }
+
+  function exportHistory(format) {
+    const params = buildHistoryQueryParams();
+    params.set("format", format);
+    window.location.href = `/api/history/export?${params.toString()}`;
+  }
+
+  if (btnExportCSV) {
+    btnExportCSV.addEventListener("click", () => exportHistory("csv"));
+  }
+  if (btnExportJSON) {
+    btnExportJSON.addEventListener("click", () => exportHistory("json"));
+  }
+
+  async function fetchQuotaStatus() {
+    if (!quotaBanner) return;
+    try {
+      const res = await fetch("/api/quota");
+      if (!res.ok) return;
+      const qs = await res.json();
+      if (!qs.enabled) {
+        quotaBanner.classList.add("hidden");
+        return;
+      }
+      quotaBanner.classList.remove("hidden");
+      const usedGB = ((qs.usedBytes || 0) / (1024 * 1024 * 1024)).toFixed(2);
+      const capGB = (qs.capGb || 0).toFixed(0);
+      const pct = Math.max(0, qs.usedPct || 0);
+      const cycleStartStr = qs.cycleStart ? new Date(qs.cycleStart * 1000).toLocaleDateString() : "";
+
+      if (quotaCycleText) {
+        quotaCycleText.textContent = `Cycle started ${cycleStartStr} (Resets Day ${qs.billingDay || 1})`;
+      }
+      if (quotaUsedText) {
+        quotaUsedText.textContent = `${usedGB} GB / ${capGB} GB`;
+      }
+      if (quotaPctBadge) {
+        quotaPctBadge.textContent = `${pct.toFixed(1)}%`;
+        quotaPctBadge.classList.remove("warn", "danger");
+        if (qs.over100) quotaPctBadge.classList.add("danger");
+        else if (qs.over80) quotaPctBadge.classList.add("warn");
+      }
+      if (quotaBarFill) {
+        quotaBarFill.style.width = `${Math.min(pct, 100).toFixed(1)}%`;
+        quotaBarFill.classList.remove("warn", "danger");
+        if (qs.over100) quotaBarFill.classList.add("danger");
+        else if (qs.over80) quotaBarFill.classList.add("warn");
+      }
+    } catch (_) {}
+  }
+
+  async function fetchHistoryReport() {
+    const params = buildHistoryQueryParams();
+    fetchQuotaStatus();
 
     try {
       const res = await fetch(`/api/history?${params.toString()}`);

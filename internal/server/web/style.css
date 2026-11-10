@@ -1215,6 +1215,183 @@ canvas {
   color: var(--text-primary);
 }
 
+/* Ping / Connectivity Badges */
+.ping-badge {
+  display: inline-block;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+}
+.ping-badge.good {
+  color: var(--success);
+  border-color: rgba(34, 197, 94, 0.28);
+}
+.ping-badge.warn {
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.ping-badge.bad {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.host-tag {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  max-width: 190px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+/* Monthly Data Cap / Quota Banner */
+.quota-banner {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 11px;
+  padding: 13px 16px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.quota-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.quota-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: 8px;
+}
+
+.quota-numbers {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-pct-badge {
+  font-size: 11.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-primary-bg);
+  color: var(--accent-primary);
+}
+
+.quota-pct-badge.warn {
+  background: rgba(245, 158, 11, 0.16);
+  color: #f59e0b;
+}
+
+.quota-pct-badge.danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--danger);
+}
+
+.quota-bar-track {
+  width: 100%;
+  height: 9px;
+  background: var(--bg-elevated);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.quota-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--rx-color), var(--tx-color));
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.quota-bar-fill.warn {
+  background: #f59e0b;
+}
+
+.quota-bar-fill.danger {
+  background: var(--danger);
+}
+
+/* Compact Always-on-Top Mini-Widget Mode */
+body.mini-mode .app-shell {
+  grid-template-columns: 1fr;
+}
+
+body.mini-mode .sidebar,
+body.mini-mode .connections-card,
+body.mini-mode .meta-card,
+body.mini-mode .kpi-sub,
+body.mini-mode .chart-card-header,
+body.mini-mode .chart-axis-footer,
+body.mini-mode #btnStayOnTop,
+body.mini-mode #btnQuickTheme,
+body.mini-mode #viewSubtitle {
+  display: none !important;
+}
+
+body.mini-mode .main-content {
+  padding: 8px 10px;
+  overflow: hidden;
+}
+
+body.mini-mode .top-bar {
+  margin-bottom: 6px;
+}
+
+body.mini-mode .top-bar-title h1 {
+  font-size: 13px;
+}
+
+body.mini-mode #btnMiniWidget {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+body.mini-mode #tab-realtime {
+  gap: 6px;
+}
+
+body.mini-mode .kpi-grid {
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+body.mini-mode .kpi-card {
+  padding: 6px 10px;
+  gap: 2px;
+  border-radius: 8px;
+}
+
+body.mini-mode .kpi-label {
+  font-size: 9.5px;
+}
+
+body.mini-mode .kpi-value {
+  font-size: 16px;
+}
+
+body.mini-mode .chart-card {
+  padding: 6px;
+  border-radius: 8px;
+}
+
+body.mini-mode .canvas-wrap {
+  height: 74px;
+}
+
 @media (max-width: 960px) {
   .kpi-grid,
   .kpi-grid-4,

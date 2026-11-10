@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -46,13 +49,17 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/favicon.ico", s.handleFavicon)
 	mux.HandleFunc("/api/ping", s.handlePing)
 	mux.HandleFunc("/api/realtime", s.handleRealtime)
 	mux.HandleFunc("/api/connections", s.handleConnections)
 	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
 	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/history/export", s.handleHistoryExport)
+	mux.HandleFunc("/api/quota", s.handleQuota)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/window/topmost", s.handleWindowTopmost)
+	mux.HandleFunc("/api/window/mini", s.handleWindowMini)
 	mux.HandleFunc("/api/window/bounds", s.handleWindowBounds)
 	mux.HandleFunc("/api/service", s.handleService)
 	mux.HandleFunc("/ws", s.handleWS)
@@ -91,11 +98,152 @@ func (s *Server) Start(ctx context.Context) error {
 	return err
 }
 
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	ico := tray.GenerateMultiSizeAppICO()
+	w.Header().Set("Content-Type", "image/x-icon")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(ico)
+}
+
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"app":     "traffcount",
-		"version": "1.0.0",
+		"version": "1.1.0",
+	})
+}
+
+func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
+	s.collector.FlushToDB()
+	qs, err := s.store.QueryQuotaStatus()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, qs)
+}
+
+func (s *Server) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
+	s.collector.FlushToDB()
+
+	q := r.URL.Query()
+	ifaceID := q.Get("iface")
+	if ifaceID == "" {
+		ifaceID = "all"
+	}
+	format := q.Get("format")
+	if format == "" {
+		format = "csv"
+	}
+
+	now := time.Now()
+	var start, end time.Time
+	end = now
+
+	if startStr := q.Get("start"); startStr != "" {
+		if ts, err := strconv.ParseInt(startStr, 10, 64); err == nil {
+			start = time.Unix(ts, 0)
+		}
+	}
+	if endStr := q.Get("end"); endStr != "" {
+		if ts, err := strconv.ParseInt(endStr, 10, 64); err == nil {
+			end = time.Unix(ts, 0)
+		}
+	}
+
+	if start.IsZero() {
+		days := 14
+		if dStr := q.Get("days"); dStr != "" {
+			if d, err := strconv.Atoi(dStr); err == nil && d > 0 {
+				days = d
+			}
+		}
+		if q.Get("period") == "today" {
+			y, m, d := now.Date()
+			start = time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+		} else if q.Get("period") == "24h" {
+			start = now.Add(-24 * time.Hour)
+		} else {
+			y, m, d := now.AddDate(0, 0, -(days - 1)).Date()
+			start = time.Date(y, m, d, 0, 0, 0, 0, now.Location())
+		}
+	}
+
+	report, err := s.store.QueryHistory(start, end, ifaceID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if format == "json" {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="traffcount-history.json"`)
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(report)
+		return
+	}
+
+	var buf bytes.Buffer
+	cw := csv.NewWriter(&buf)
+	_ = cw.Write([]string{"Section", "Label_Or_Adapter", "Download_Bytes", "Upload_Bytes", "Total_Bytes", "Download_GB", "Upload_GB", "Total_GB"})
+	for _, b := range report.Series {
+		tot := b.RxBytes + b.TxBytes
+		_ = cw.Write([]string{
+			"TimeBucket",
+			b.Label,
+			strconv.FormatUint(b.RxBytes, 10),
+			strconv.FormatUint(b.TxBytes, 10),
+			strconv.FormatUint(tot, 10),
+			fmt.Sprintf("%.4f", float64(b.RxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(b.TxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(tot)/1e9),
+		})
+	}
+	for _, a := range report.ByAdapter {
+		_ = cw.Write([]string{
+			"ByAdapter",
+			a.FriendlyName,
+			strconv.FormatUint(a.RxBytes, 10),
+			strconv.FormatUint(a.TxBytes, 10),
+			strconv.FormatUint(a.Total, 10),
+			fmt.Sprintf("%.4f", float64(a.RxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(a.TxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(a.Total)/1e9),
+		})
+	}
+	cw.Flush()
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="traffcount-history.csv"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
+}
+
+func (s *Server) handleWindowMini(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Mini bool `json:"mini"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	applied := false
+	if s.winMgr != nil {
+		applied = s.winMgr.SetMiniMode(req.Mini)
+	}
+	if tray.NotifyTrayMiniMode(req.Mini) {
+		applied = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mini":    req.Mini,
+		"applied": applied,
 	})
 }
 

@@ -24,6 +24,9 @@ if ($wasServiceRunning) {
 
 Stop-Process -Name traffcount -Force -ErrorAction SilentlyContinue
 
+Write-Host "Generating app icon and PE resource (.ico + .syso)..." -ForegroundColor Cyan
+go run ./cmd/genicon
+
 Write-Host "Building traffcount.exe (Windows GUI subsystem + Windows Service)..." -ForegroundColor Cyan
 
 go build -ldflags="-s -w -H=windowsgui" -o traffcount.exe ./cmd/traffcount
