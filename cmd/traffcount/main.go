@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,7 +86,13 @@ func main() {
 	var initialTopmost bool
 	var startMinimized bool
 	var initialBounds storage.WindowBounds
-	if st, err := storage.Open(""); err == nil {
+	if alreadyRunning {
+		initialBounds = fetchBoundsFromServer(dashboardURL)
+		if cfg, ok := fetchSettingsFromServer(dashboardURL); ok {
+			initialTopmost = cfg.AlwaysOnTop
+			startMinimized = cfg.StartMinimized
+		}
+	} else if st, err := storage.Open(""); err == nil {
 		if cfg, err := st.GetSettings(); err == nil {
 			initialTopmost = cfg.AlwaysOnTop
 			startMinimized = cfg.StartMinimized
@@ -94,12 +101,6 @@ func main() {
 			initialBounds = b
 		}
 		st.Close()
-	} else if alreadyRunning {
-		initialBounds = fetchBoundsFromServer(dashboardURL)
-		if cfg, ok := fetchSettingsFromServer(dashboardURL); ok {
-			initialTopmost = cfg.AlwaysOnTop
-			startMinimized = cfg.StartMinimized
-		}
 	}
 
 	winMgr := winui.NewManager(dashboardURL, initialTopmost)
@@ -112,10 +113,25 @@ func main() {
 	// Manual start opens the dashboard unless StartMinimized is enabled in settings.
 	shouldAutoOpen := !*trayOnly && !startMinimized
 
+	var daemonMu sync.Mutex
+	var daemonCancel context.CancelFunc
+	var pauseFallbackUntil time.Time
+
+	releaseLocalServer := func() {
+		daemonMu.Lock()
+		pauseFallbackUntil = time.Now().Add(4 * time.Second)
+		if daemonCancel != nil {
+			daemonCancel()
+			daemonCancel = nil
+		}
+		daemonMu.Unlock()
+	}
+
 	trayCtrl = tray.NewController(tray.Options{
-		DashboardURL: dashboardURL,
-		WinMgr:       winMgr,
-		AutoOpenUI:   shouldAutoOpen,
+		DashboardURL:    dashboardURL,
+		WinMgr:          winMgr,
+		AutoOpenUI:      shouldAutoOpen,
+		OnReleaseServer: releaseLocalServer,
 		OnExit: func() {
 			stop()
 		},
@@ -131,14 +147,24 @@ func main() {
 				return
 			default:
 			}
-			if !isServerAlive(dashboardURL) {
-				_ = runDaemon(ctx, *addr, winMgr, func(topmost bool) {
+			daemonMu.Lock()
+			paused := time.Now().Before(pauseFallbackUntil)
+			daemonMu.Unlock()
+
+			if !paused && !isServerAlive(dashboardURL) {
+				dCtx, dCancel := context.WithCancel(ctx)
+				daemonMu.Lock()
+				daemonCancel = dCancel
+				daemonMu.Unlock()
+
+				_ = runDaemon(dCtx, *addr, winMgr, func(topmost bool) {
 					if trayCtrl != nil {
 						trayCtrl.SyncStayOnTop(topmost)
 					}
 				})
+				dCancel()
 			}
-			time.Sleep(1500 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
 		}
 	}()
 	if !alreadyRunning {

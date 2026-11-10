@@ -153,7 +153,7 @@ func (m *Manager) IsMiniMode() bool {
 	return m.miniMode
 }
 
-// SetMiniMode resizes the open TraffCount window into a compact 360x215 always-on-top mini-widget
+// SetMiniMode resizes the open TraffCount window into a compact 380x230 always-on-top mini-widget
 // or restores its normal saved bounds.
 func (m *Manager) SetMiniMode(mini bool) bool {
 	if mini {
@@ -171,14 +171,24 @@ func (m *Manager) SetMiniMode(mini bool) bool {
 			zoomed, _, _ := procIsZoomed.Call(hwnd)
 			if zoomed != 0 {
 				procShowWindow.Call(hwnd, SW_RESTORE)
+				time.Sleep(50 * time.Millisecond)
+			}
+			var r winRect
+			procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+			targetX := int(r.Left)
+			targetY := int(r.Top)
+			if targetX < 0 || targetY < 0 {
+				targetX = 80
+				targetY = 80
 			}
 			procSetWindowPos.Call(
 				hwnd,
 				HWND_TOPMOST,
-				0, 0,
-				uintptr(360),
-				uintptr(220),
-				SWP_NOMOVE|SWP_NOACTIVATE|SWP_FRAMECHANGED,
+				uintptr(int32(targetX)),
+				uintptr(int32(targetY)),
+				uintptr(380),
+				uintptr(230),
+				SWP_SHOWWINDOW|SWP_FRAMECHANGED,
 			)
 		} else {
 			if bounds.Width < 450 {
@@ -186,6 +196,12 @@ func (m *Manager) SetMiniMode(mini bool) bool {
 			}
 			if bounds.Height < 320 {
 				bounds.Height = 780
+			}
+			if bounds.X < 0 {
+				bounds.X = 120
+			}
+			if bounds.Y < 0 {
+				bounds.Y = 80
 			}
 			applyWindowBounds(hwnd, bounds)
 			applyTopmost(hwnd, topmost)
@@ -205,35 +221,47 @@ func (m *Manager) IsAlwaysOnTop() bool {
 func (m *Manager) SetAlwaysOnTop(topmost bool) bool {
 	m.mu.Lock()
 	m.alwaysOnTop = topmost
+	effectiveTop := topmost || m.miniMode
 	m.mu.Unlock()
 
-	return ApplyTopmostToAllWindows(topmost)
+	return ApplyTopmostToAllWindows(effectiveTop)
 }
 
 // InterceptMinimizeToTray checks if any TraffCount window has been minimized (IsIconic)
-// and immediately closes it (WM_CLOSE) so minimizing behaves identically to closing the window to the System Tray.
+// and hides it (SW_RESTORE + SW_HIDE) so it goes cleanly to the System Tray icon without destroying window state.
 func (m *Manager) InterceptMinimizeToTray() bool {
 	hwlist := FindAllTraffCountWindows(true)
-	closedAny := false
+	hiddenAny := false
 	for _, hwnd := range hwlist {
 		iconic, _, _ := procIsIconic.Call(hwnd)
 		if iconic != 0 {
-			procPostMessageW.Call(hwnd, WM_CLOSE, 0, 0)
-			closedAny = true
+			procShowWindow.Call(hwnd, SW_RESTORE)
+			procShowWindow.Call(hwnd, SW_HIDE)
+			hiddenAny = true
 		}
 	}
-	return closedAny
+	return hiddenAny
 }
 
 // EnforceAlwaysOnTop checks open TraffCount windows and ensures their WS_EX_TOPMOST style matches topmost.
 func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 	m.mu.Lock()
 	m.alwaysOnTop = topmost
-	effectiveTop := topmost || m.miniMode
+	inMini := m.miniMode
+	effectiveTop := topmost || inMini
 	m.mu.Unlock()
 
 	hwlist := FindAllTraffCountWindows(true)
 	for _, hwnd := range hwlist {
+		if inMini {
+			var r winRect
+			ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+			if ret != 0 && ((r.Right-r.Left) > 420 || (r.Bottom-r.Top) > 280) {
+				// Window is supposed to be in mini-mode but hasn't been resized yet
+				m.SetMiniMode(true)
+				return
+			}
+		}
 		isTop := isWindowTopmost(hwnd)
 		if isTop != effectiveTop {
 			applyTopmost(hwnd, effectiveTop)
@@ -245,12 +273,17 @@ func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 func (m *Manager) OpenDashboard() error {
 	m.mu.Lock()
 	topmost := m.alwaysOnTop
+	inMini := m.miniMode
 	url := m.url
 	bounds := m.bounds
-	if hwnd := FindTraffCountWindow(); hwnd != 0 {
+	if hwnd := FindAnyTraffCountWindow(); hwnd != 0 {
 		m.mu.Unlock()
-		focusExistingWindow(hwnd, topmost, bounds)
-		return nil
+		focusExistingWindow(hwnd, topmost, bounds, inMini)
+		time.Sleep(60 * time.Millisecond)
+		if vis, _, _ := procIsWindowVisible.Call(hwnd); vis != 0 {
+			return nil
+		}
+		m.mu.Lock()
 	}
 	if m.launching {
 		// Another click already initiated window launch and is waiting for it to appear
@@ -269,10 +302,10 @@ func (m *Manager) OpenDashboard() error {
 
 		w := bounds.Width
 		h := bounds.Height
-		if w < 400 {
+		if w < 450 {
 			w = 1180
 		}
-		if h < 300 {
+		if h < 320 {
 			h = 780
 		}
 
@@ -296,14 +329,22 @@ func (m *Manager) OpenDashboard() error {
 					m.mu.Unlock()
 				}()
 				// Poll briefly for the window to appear so we can apply saved bounds, Always-On-Top, and focus
-				for i := 0; i < 30; i++ {
+				for i := 0; i < 35; i++ {
 					time.Sleep(100 * time.Millisecond)
+					if i == 10 && FindTraffCountWindow() == 0 {
+						// Retry launch once in case previous Edge instance was still releasing its profile lock
+						_ = exec.Command(edgePath, args...).Start()
+					}
 					if hwnd := FindTraffCountWindow(); hwnd != 0 {
-						b := m.GetSavedBounds()
-						if b.HasValue {
-							applyWindowBounds(hwnd, b)
+						if m.IsMiniMode() {
+							m.SetMiniMode(true)
+						} else {
+							b := m.GetSavedBounds()
+							if b.HasValue {
+								applyWindowBounds(hwnd, b)
+							}
+							applyTopmost(hwnd, m.IsAlwaysOnTop())
 						}
-						applyTopmost(hwnd, m.IsAlwaysOnTop())
 						procSetForeground.Call(hwnd)
 						break
 					}
@@ -322,7 +363,7 @@ func (m *Manager) OpenDashboard() error {
 }
 
 func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
-	if b.Width >= 400 && b.Height >= 300 {
+	if b.Width >= 450 && b.Height >= 320 {
 		procSetWindowPos.Call(
 			hwnd,
 			0,
@@ -338,7 +379,7 @@ func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
 	}
 }
 
-func focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds) {
+func focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds, inMini bool) {
 	vis, _, _ := procIsWindowVisible.Call(hwnd)
 	iconic, _, _ := procIsIconic.Call(hwnd)
 	if vis == 0 {
@@ -347,11 +388,22 @@ func focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds
 	if iconic != 0 {
 		procShowWindow.Call(hwnd, SW_RESTORE)
 	}
-	if bounds.HasValue {
+	if inMini {
+		procSetWindowPos.Call(
+			hwnd,
+			HWND_TOPMOST,
+			0, 0,
+			uintptr(380),
+			uintptr(230),
+			SWP_NOMOVE|SWP_SHOWWINDOW|SWP_FRAMECHANGED,
+		)
+	} else if bounds.HasValue {
 		applyWindowBounds(hwnd, bounds)
+		applyTopmost(hwnd, topmost)
+	} else {
+		applyTopmost(hwnd, topmost)
 	}
 	procSetForeground.Call(hwnd)
-	applyTopmost(hwnd, topmost)
 }
 
 // FindTraffCountWindow searches top-level visible windows for one whose title contains WindowTitlePrefix.

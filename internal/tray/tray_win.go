@@ -35,10 +35,11 @@ const (
 	WM_QUIT_APP      = WM_USER + 22
 	WM_SET_TOPMOST   = WM_USER + 23
 	WM_SET_STARTUP   = WM_USER + 24
-	WM_UPDATE_TIP    = WM_USER + 25
-	WM_SHOW_BALLOON  = WM_USER + 26
-	WM_SET_MINIMODE  = WM_USER + 27
-	WM_LBUTTONUP     = 0x0202
+	WM_UPDATE_TIP     = WM_USER + 25
+	WM_SHOW_BALLOON   = WM_USER + 26
+	WM_SET_MINIMODE   = WM_USER + 27
+	WM_RELEASE_SERVER = WM_USER + 28
+	WM_LBUTTONUP      = 0x0202
 	WM_LBUTTONDBLCLK = 0x0203
 	WM_RBUTTONUP     = 0x0205
 	WM_CONTEXTMENU   = 0x007B
@@ -157,10 +158,11 @@ type notifyIconDataW struct {
 
 // Options configures the System Tray runner.
 type Options struct {
-	DashboardURL string
-	WinMgr       *winui.Manager
-	AutoOpenUI   bool
-	OnExit       func()
+	DashboardURL    string
+	WinMgr          *winui.Manager
+	AutoOpenUI      bool
+	OnReleaseServer func()
+	OnExit          func()
 }
 
 // Controller manages the Windows 11 System Tray icon and context menu.
@@ -418,6 +420,12 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 		}
 		return 0
 
+	case WM_RELEASE_SERVER:
+		if c != nil && c.opts.OnReleaseServer != nil {
+			go c.opts.OnReleaseServer()
+		}
+		return 0
+
 	case WM_CLOSE, WM_QUIT_APP:
 		procDestroyWindow.Call(hwnd)
 		return 0
@@ -583,8 +591,10 @@ func setTipText(nid *notifyIconDataW, text string) {
 }
 
 func (c *Controller) windowMinimizeWatcher(ctx context.Context) {
+	client := &http.Client{Timeout: 400 * time.Millisecond}
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -592,6 +602,24 @@ func (c *Controller) windowMinimizeWatcher(ctx context.Context) {
 		case <-ticker.C:
 			if c.opts.WinMgr != nil {
 				c.opts.WinMgr.InterceptMinimizeToTray()
+			}
+			ticks++
+			if ticks >= 5 && c.opts.WinMgr != nil {
+				ticks = 0
+				resp, err := client.Get(c.opts.DashboardURL + "/api/window/mini")
+				if err == nil {
+					if resp.StatusCode == http.StatusOK {
+						var st struct {
+							Mini bool `json:"mini"`
+						}
+						if json.NewDecoder(resp.Body).Decode(&st) == nil {
+							if c.opts.WinMgr.IsMiniMode() != st.Mini {
+								c.opts.WinMgr.SetMiniMode(st.Mini)
+							}
+						}
+					}
+					resp.Body.Close()
+				}
 			}
 		}
 	}

@@ -316,6 +316,14 @@
   // Mini-Widget Floating Overlay Mode Toggle
   if (btnMiniWidget) {
     btnMiniWidget.addEventListener("click", async () => {
+      if (!state.miniMode && window.outerWidth >= 450 && window.outerHeight >= 320) {
+        state.normalBounds = {
+          x: Math.max(0, Math.round(window.screenX)),
+          y: Math.max(0, Math.round(window.screenY)),
+          width: Math.round(window.outerWidth),
+          height: Math.round(window.outerHeight),
+        };
+      }
       state.miniMode = !state.miniMode;
       document.body.classList.toggle("mini-mode", state.miniMode);
       btnMiniWidget.classList.toggle("pinned", state.miniMode);
@@ -334,7 +342,16 @@
           body: JSON.stringify({ mini: state.miniMode }),
         });
       } catch (_) {}
+      try {
+        if (state.miniMode) {
+          window.resizeTo(380, 230);
+        } else if (state.normalBounds) {
+          window.resizeTo(state.normalBounds.width, state.normalBounds.height);
+          window.moveTo(state.normalBounds.x, state.normalBounds.y);
+        }
+      } catch (_) {}
       setTimeout(() => renderRealtimeView(), 120);
+      setTimeout(() => renderRealtimeView(), 300);
     });
   }
 
@@ -422,21 +439,23 @@
 
     // Connectivity / Latency probes (1.1.1.1 & 8.8.8.8)
     if (rtPingBadgesEl) {
-      const probes = payload.diagnostics?.probes || [];
+      const probes = payload.diagnostics?.targets || payload.diagnostics?.probes || [];
       if (probes.length === 0) {
         rtPingBadgesEl.textContent = "Probing...";
       } else {
         rtPingBadgesEl.innerHTML = probes
           .map((p) => {
+            const addr = p.address || (p.target ? p.target.replace(":53", "") : "");
+            const name = p.name || p.target || addr;
             if (!p.online) {
-              return `<span class="ping-badge bad" title="${escapeHtml(p.target)} (${escapeHtml(p.address)}) Offline">${escapeHtml(p.address)} Offline</span>`;
+              return `<span class="ping-badge bad" title="${escapeHtml(name)} (${escapeHtml(addr)}) Offline">${escapeHtml(addr)} Offline</span>`;
             }
-            const ms = p.latencyMs ? p.latencyMs.toFixed(0) : "0";
+            const ms = p.latencyMs ? Number(p.latencyMs).toFixed(0) : "0";
             let cls = "good";
             if (p.latencyMs > 120 || p.lossPct > 10) cls = "bad";
             else if (p.latencyMs > 55 || p.lossPct > 0) cls = "warn";
             const lossTxt = p.lossPct > 0 ? ` (${p.lossPct.toFixed(0)}% loss)` : "";
-            return `<span class="ping-badge ${cls}" title="${escapeHtml(p.target)}: ${ms} ms${lossTxt}">${escapeHtml(p.address)}: ${ms}ms${lossTxt}</span>`;
+            return `<span class="ping-badge ${cls}" title="${escapeHtml(name)}: ${ms} ms${lossTxt}">${escapeHtml(addr)}: ${ms}ms${lossTxt}</span>`;
           })
           .join("");
       }
@@ -1294,6 +1313,20 @@
   }
 
   async function invokeServiceAction(action) {
+    const labelMap = {
+      install: "Installing & Starting...",
+      start: "Starting...",
+      stop: "Stopping...",
+      uninstall: "Uninstalling...",
+    };
+    if (svcStateText && labelMap[action]) {
+      svcStateText.textContent = `TraffCountService: ${labelMap[action]}`;
+    }
+    if (svcBadge && labelMap[action]) {
+      svcBadge.textContent = labelMap[action];
+      svcBadge.classList.remove("running");
+    }
+
     try {
       const res = await fetch("/api/service", {
         method: "POST",
@@ -1304,9 +1337,13 @@
         const st = await res.json();
         updateServiceUI(st);
       }
-      setTimeout(fetchServiceStatus, 1500);
     } catch (e) {
-      console.error("Service action failed:", e);
+      // Expected if the server handed over port 9876 during start/stop transition
+    }
+
+    // Poll status frequently across the service/standalone transition so the UI updates immediately
+    for (let i = 1; i <= 14; i++) {
+      setTimeout(fetchServiceStatus, i * 350);
     }
   }
 
@@ -1325,6 +1362,9 @@
     ws.onopen = () => {
       dot.classList.add("online");
       txt.textContent = "Live (1Hz)";
+      if (state.activeTab === "settings") {
+        fetchServiceStatus();
+      }
     };
 
     ws.onmessage = (ev) => {
@@ -1337,6 +1377,8 @@
           fetchConnections();
         } else if (state.activeTab === "history") {
           fetchHistoryReport();
+        } else if (state.activeTab === "settings") {
+          fetchServiceStatus();
         }
       } catch (e) {
         console.error("WS parse error:", e);

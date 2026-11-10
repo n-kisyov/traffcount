@@ -10,37 +10,44 @@ import (
 
 // PingTargetStatus holds live TCP/ICMP probe latency and packet loss for a connectivity target.
 type PingTargetStatus struct {
-	Name       string  `json:"name"`
-	Target     string  `json:"target"`
-	LatencyMs  int64   `json:"latencyMs"`
-	Online     bool    `json:"online"`
-	LossPct    float64 `json:"lossPct"`
+	Name      string  `json:"name"`
+	Target    string  `json:"target"`
+	Address   string  `json:"address"`
+	LatencyMs int64   `json:"latencyMs"`
+	Online    bool    `json:"online"`
+	LossPct   float64 `json:"lossPct"`
 }
 
 // DiagnosticsStatus holds live internet connectivity and latency health.
 type DiagnosticsStatus struct {
 	Targets []PingTargetStatus `json:"targets"`
+	Probes  []PingTargetStatus `json:"probes"`
 }
 
 type probeRing struct {
 	name    string
 	addr    string
+	shortIP string
 	samples []bool
 	lastMs  int64
 	online  bool
 }
 
 var (
-	diagMu   sync.RWMutex
-	diagLast DiagnosticsStatus
-	probes   = []*probeRing{
-		{name: "Cloudflare DNS", addr: "1.1.1.1:53"},
-		{name: "Google DNS", addr: "8.8.8.8:53"},
+	probeRunMu sync.Mutex
+	diagMu     sync.RWMutex
+	diagLast   DiagnosticsStatus
+	probes     = []*probeRing{
+		{name: "Cloudflare DNS", addr: "1.1.1.1:53", shortIP: "1.1.1.1"},
+		{name: "Google DNS", addr: "8.8.8.8:53", shortIP: "8.8.8.8"},
 	}
 )
 
 // ProbeConnectivity measures TCP handshake RTT to 1.1.1.1:53 and 8.8.8.8:53.
 func ProbeConnectivity() DiagnosticsStatus {
+	probeRunMu.Lock()
+	defer probeRunMu.Unlock()
+
 	var results []PingTargetStatus
 	for _, p := range probes {
 		start := time.Now()
@@ -76,14 +83,15 @@ func ProbeConnectivity() DiagnosticsStatus {
 
 		results = append(results, PingTargetStatus{
 			Name:      p.name,
-			Target:    p.addr,
+			Target:    p.name,
+			Address:   p.shortIP,
 			LatencyMs: p.lastMs,
 			Online:    p.online,
 			LossPct:   loss,
 		})
 	}
 
-	st := DiagnosticsStatus{Targets: results}
+	st := DiagnosticsStatus{Targets: results, Probes: results}
 	diagMu.Lock()
 	diagLast = st
 	diagMu.Unlock()

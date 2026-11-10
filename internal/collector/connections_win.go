@@ -324,6 +324,13 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 		ps.TotalRx = tr.cumRx
 		ps.TotalTx = tr.cumTx
 	}
+	if len(procTrack) > 256 {
+		for k, tr := range procTrack {
+			if now.Sub(tr.lastSample) > 5*time.Minute {
+				delete(procTrack, k)
+			}
+		}
+	}
 	procTrackMu.Unlock()
 
 	// Sort connections: ESTABLISHED first, then LISTEN, then by process name
@@ -456,6 +463,13 @@ func lookupRemoteHostnameAsync(ip string, now time.Time) string {
 		dnsMu.Unlock()
 		return entry.host
 	}
+	if len(dnsCache) > 512 {
+		for k, v := range dnsCache {
+			if now.After(v.expiresAt) {
+				delete(dnsCache, k)
+			}
+		}
+	}
 	dnsCache[ip] = dnsCacheEntry{
 		host:      classifyWellKnownIP(ip),
 		expiresAt: now.Add(5 * time.Minute),
@@ -530,6 +544,13 @@ func resolveProcessName(pid int32, now time.Time) string {
 	}
 
 	pidMu.Lock()
+	if len(pidCache) > 512 {
+		for k, v := range pidCache {
+			if now.After(v.expiresAt) {
+				delete(pidCache, k)
+			}
+		}
+	}
 	pidCache[pid] = pidCacheEntry{
 		name:      name,
 		expiresAt: now.Add(30 * time.Second),

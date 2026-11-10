@@ -30,6 +30,7 @@ type Server struct {
 	store        *storage.Store
 	collector    *collector.Collector
 	winMgr       *winui.Manager
+	miniMode     bool
 	onTopChanged func(bool)
 	upgrader     websocket.Upgrader
 	httpSrv      *http.Server
@@ -223,6 +224,12 @@ func (s *Server) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWindowMini(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mini": s.miniMode,
+		})
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -234,6 +241,7 @@ func (s *Server) handleWindowMini(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	s.miniMode = req.Mini
 	applied := false
 	if s.winMgr != nil {
 		applied = s.winMgr.SetMiniMode(req.Mini)
@@ -434,6 +442,58 @@ func (s *Server) handleService(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
+
+		// If the current process is the Windows Service and the action is stop/uninstall,
+		// or if the current process is the standalone server and the action is start/install,
+		// write the HTTP response BEFORE triggering the port-handover / self-stop so the browser
+		// never gets a connection reset.
+		if service.IsWindowsServiceProcess() && (req.Action == "stop" || req.Action == "uninstall") {
+			s.collector.FlushToDB()
+			st := service.QueryStatus()
+			if req.Action == "uninstall" {
+				st.Installed = false
+				st.Running = false
+				st.StateText = "Not Installed"
+			} else {
+				st.Running = false
+				st.StateText = "Stopped"
+			}
+			writeJSON(w, http.StatusOK, st)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			go func(act string) {
+				time.Sleep(80 * time.Millisecond)
+				if act == "uninstall" {
+					_ = service.StopAndUninstall()
+				} else {
+					_ = service.StopService()
+				}
+			}(req.Action)
+			return
+		}
+
+		if !service.IsWindowsServiceProcess() && (req.Action == "start" || req.Action == "install") {
+			s.collector.FlushToDB()
+			st := service.QueryStatus()
+			st.Installed = true
+			st.Running = true
+			st.StateText = "Starting..."
+			writeJSON(w, http.StatusOK, st)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			go func(act string) {
+				time.Sleep(80 * time.Millisecond)
+				if act == "install" {
+					_ = service.InstallAndStart()
+				} else {
+					_ = service.StartService()
+				}
+			}(req.Action)
+			return
+		}
+
 		var err error
 		switch req.Action {
 		case "install":
