@@ -29,6 +29,9 @@
       includeUDP: false,
       search: "",
     },
+    rtHover: null,        // { x, y, index }
+    histHover: null,      // { x, y, index }
+    currentRtPoints: [],
   };
 
   // DOM Elements
@@ -64,6 +67,7 @@
   const rtAdapterDescEl = document.getElementById("rtAdapterDesc");
   const rtScaleMaxEl = document.getElementById("rtScaleMax");
   const rtCanvas = document.getElementById("realtimeCanvas");
+  const rtTooltip = document.getElementById("rtTooltip");
 
   // Connections Inspector DOM
   const connCountEstEl = document.getElementById("connCountEst");
@@ -95,6 +99,7 @@
   const histGranularityLabelEl = document.getElementById("histGranularityLabel");
   const historyIfaceTableBody = document.getElementById("historyIfaceTableBody");
   const histCanvas = document.getElementById("historyCanvas");
+  const histTooltip = document.getElementById("histTooltip");
 
   // Settings DOM
   const themeButtons = document.querySelectorAll("#themeSelector .seg-btn");
@@ -663,6 +668,7 @@
     }
 
     const pts = history && history.length ? history : [];
+    state.currentRtPoints = pts;
     let peak = 0;
     for (const p of pts) {
       if (p.rxBps > peak) peak = p.rxBps;
@@ -672,16 +678,17 @@
     rtScaleMaxEl.textContent = formatRate(maxScale);
 
     if (pts.length < 2) {
+      if (rtTooltip) rtTooltip.classList.add("hidden");
       ctx.restore();
       return;
     }
 
     const count = 60;
     const stepX = width / (count - 1);
+    const offset = count - pts.length;
 
     function plotSeries(key, strokeColor, fillColor, dashed = false) {
       ctx.beginPath();
-      const offset = count - pts.length;
       for (let i = 0; i < pts.length; i++) {
         const x = (i + offset) * stepX;
         const ratio = Math.min((pts[i][key] || 0) / maxScale, 1);
@@ -709,7 +716,90 @@
     plotSeries("txBps", txColor, txFill, false);
     plotSeries("rxBps", rxColor, rxFill, false);
 
+    // Draw hover crosshair & update tooltip if mouse is over the real-time chart
+    if (state.rtHover && pts.length > 0) {
+      const rawIdx = Math.round(state.rtHover.x / stepX) - offset;
+      const idx = Math.max(0, Math.min(pts.length - 1, rawIdx));
+      const pt = pts[idx];
+      const cx = (idx + offset) * stepX;
+      const rxY = height - Math.min((pt.rxBps || 0) / maxScale, 1) * (height - 10) - 2;
+      const txY = height - Math.min((pt.txBps || 0) / maxScale, 1) * (height - 10) - 2;
+
+      // Vertical guide line
+      ctx.strokeStyle = style.getPropertyValue("--border-strong").trim() || "rgba(255,255,255,0.3)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(cx, 0);
+      ctx.lineTo(cx, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Highlight dots
+      ctx.fillStyle = txColor;
+      ctx.beginPath();
+      ctx.arc(cx, txY, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = rxColor;
+      ctx.beginPath();
+      ctx.arc(cx, rxY, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      updateRealtimeTooltip(pt, pts.length - 1 - idx, cx, state.rtHover.y, width, height);
+    } else if (rtTooltip) {
+      rtTooltip.classList.add("hidden");
+    }
+
     ctx.restore();
+  }
+
+  function updateRealtimeTooltip(pt, secsAgo, cx, mouseY, wrapW, wrapH) {
+    if (!rtTooltip || !pt) return;
+    const timeStr = pt.ts ? new Date(pt.ts * 1000).toLocaleTimeString() : "";
+    const agoLabel = secsAgo === 0 ? "Now" : `${secsAgo}s ago`;
+    const combinedRate = (pt.rxBps || 0) + (pt.txBps || 0);
+
+    rtTooltip.innerHTML = `
+      <div class="tt-header">
+        <span>${escapeHtml(timeStr)}</span>
+        <span class="tt-sub">${escapeHtml(agoLabel)}</span>
+      </div>
+      <div class="tt-row">
+        <span class="tt-label"><i class="tt-dot rx"></i>Inbound</span>
+        <strong style="color:var(--rx-color)">${formatRate(pt.rxBps)}</strong>
+      </div>
+      <div class="tt-row">
+        <span class="tt-label"><i class="tt-dot tx"></i>Outbound</span>
+        <strong style="color:var(--tx-color)">${formatRate(pt.txBps)}</strong>
+      </div>
+      <div class="tt-row">
+        <span>Packets/s</span>
+        <strong>↓ ${pt.rxPps || 0} / ↑ ${pt.txPps || 0}</strong>
+      </div>
+      <div class="tt-row tt-total">
+        <span>Total Rate</span>
+        <strong>${formatRate(combinedRate)}</strong>
+      </div>
+    `;
+    rtTooltip.classList.remove("hidden");
+    positionTooltip(rtTooltip, cx, mouseY, wrapW, wrapH);
+  }
+
+  function positionTooltip(el, targetX, targetY, wrapW, wrapH) {
+    const ttW = el.offsetWidth || 210;
+    const ttH = el.offsetHeight || 130;
+    let left = targetX + 14;
+    if (left + ttW + 10 > wrapW) {
+      left = targetX - ttW - 14;
+    }
+    if (left < 8) left = 8;
+
+    let top = targetY - ttH / 2;
+    if (top < 8) top = 8;
+    if (top + ttH + 8 > wrapH) top = Math.max(8, wrapH - ttH - 8);
+
+    el.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
   }
 
   // Historical Analytics View
@@ -899,6 +989,7 @@
     }
 
     if (series.length === 0) {
+      if (histTooltip) histTooltip.classList.add("hidden");
       ctx.restore();
       return;
     }
@@ -907,10 +998,24 @@
     const barW = Math.max(Math.min(groupW * 0.34, 18), 2);
     const labelEvery = Math.max(1, Math.ceil(series.length / 10));
 
+    let hoveredIdx = -1;
+    if (state.histHover && state.histHover.x >= padLeft && state.histHover.x <= width - padRight) {
+      hoveredIdx = Math.floor((state.histHover.x - padLeft) / groupW);
+      if (hoveredIdx < 0 || hoveredIdx >= series.length) {
+        hoveredIdx = -1;
+      }
+    }
+
     ctx.textAlign = "center";
     for (let i = 0; i < series.length; i++) {
       const pt = series[i];
-      const cx = padLeft + i * groupW + groupW / 2;
+      const groupX = padLeft + i * groupW;
+      const cx = groupX + groupW / 2;
+
+      if (i === hoveredIdx) {
+        ctx.fillStyle = style.getPropertyValue("--bg-surface-hover").trim() || "rgba(255,255,255,0.06)";
+        ctx.fillRect(groupX + 1, padTop, Math.max(groupW - 2, 2), plotH);
+      }
 
       const rxH = Math.max((pt.rxBytes / maxVal) * plotH, pt.rxBytes > 0 ? 2 : 0);
       const txH = Math.max((pt.txBytes / maxVal) * plotH, pt.txBytes > 0 ? 2 : 0);
@@ -929,7 +1034,75 @@
       }
     }
 
+    if (hoveredIdx >= 0) {
+      const pt = series[hoveredIdx];
+      const cx = padLeft + hoveredIdx * groupW + groupW / 2;
+      updateHistoryTooltip(pt, report, cx, state.histHover.y, width, height);
+    } else if (histTooltip) {
+      histTooltip.classList.add("hidden");
+    }
+
     ctx.restore();
+  }
+
+  function updateHistoryTooltip(pt, report, cx, mouseY, wrapW, wrapH) {
+    if (!histTooltip || !pt) return;
+    const total = (pt.rxBytes || 0) + (pt.txBytes || 0);
+    const periodTotal = report.combinedBytes || 0;
+    const sharePct = periodTotal > 0 ? ((total / periodTotal) * 100).toFixed(1) : "0.0";
+    const bucketType = report.granularity === "hour" ? "Hourly Bucket" : "Daily Bucket";
+
+    histTooltip.innerHTML = `
+      <div class="tt-header">
+        <span>${escapeHtml(pt.label)}</span>
+        <span class="tt-sub">${bucketType}</span>
+      </div>
+      <div class="tt-row">
+        <span class="tt-label"><i class="tt-dot rx"></i>Inbound</span>
+        <strong style="color:var(--rx-color)">${formatBytes(pt.rxBytes)}</strong>
+      </div>
+      <div class="tt-row">
+        <span class="tt-label"><i class="tt-dot tx"></i>Outbound</span>
+        <strong style="color:var(--tx-color)">${formatBytes(pt.txBytes)}</strong>
+      </div>
+      <div class="tt-row tt-total">
+        <span>Combined Total</span>
+        <strong>${formatBytes(total)}</strong>
+      </div>
+      <div class="tt-row">
+        <span>Period Share</span>
+        <strong>${sharePct}%</strong>
+      </div>
+    `;
+    histTooltip.classList.remove("hidden");
+    positionTooltip(histTooltip, cx, mouseY, wrapW, wrapH);
+  }
+
+  // Attach interactive mouse hover listeners for both charts
+  if (rtCanvas) {
+    rtCanvas.addEventListener("mousemove", (e) => {
+      const rect = rtCanvas.getBoundingClientRect();
+      state.rtHover = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      drawTaskManagerGraph(state.currentRtPoints);
+    });
+    rtCanvas.addEventListener("mouseleave", () => {
+      state.rtHover = null;
+      if (rtTooltip) rtTooltip.classList.add("hidden");
+      drawTaskManagerGraph(state.currentRtPoints);
+    });
+  }
+
+  if (histCanvas) {
+    histCanvas.addEventListener("mousemove", (e) => {
+      const rect = histCanvas.getBoundingClientRect();
+      state.histHover = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if (state.historyReport) drawHistoryChart(state.historyReport);
+    });
+    histCanvas.addEventListener("mouseleave", () => {
+      state.histHover = null;
+      if (histTooltip) histTooltip.classList.add("hidden");
+      if (state.historyReport) drawHistoryChart(state.historyReport);
+    });
   }
 
   // Windows Service Control
