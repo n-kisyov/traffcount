@@ -96,3 +96,4 @@ func LatestDiagnostics() DiagnosticsStatus {
 	defer diagMu.RUnlock()
 	return diagLast
 }
+
