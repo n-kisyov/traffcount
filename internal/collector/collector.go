@@ -7,6 +7,7 @@ import (
 	"time"
 
 	psnet "github.com/shirou/gopsutil/v4/net"
+	"traffcount/internal/service"
 	"traffcount/internal/storage"
 )
 
@@ -44,6 +45,7 @@ type LiveInterfaceSnapshot struct {
 // RealtimePayload is broadcast every second to WebSocket subscribers and tray tooltip.
 type RealtimePayload struct {
 	Timestamp   int64                   `json:"timestamp"`
+	Source      string                  `json:"source"` // "service" or "app"
 	TotalRxBps  uint64                  `json:"totalRxBps"`
 	TotalTxBps  uint64                  `json:"totalTxBps"`
 	TotalHist   []RatePoint             `json:"totalHistory"`
@@ -181,6 +183,7 @@ func (c *Collector) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			c.FlushToDB()
+			c.closeSubscribers()
 			return
 		case <-pollTicker.C:
 			payload := c.sample(false)
@@ -206,6 +209,22 @@ func (c *Collector) broadcast(p RealtimePayload) {
 		default:
 		}
 	}
+}
+
+func (c *Collector) closeSubscribers() {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	for ch := range c.subscribers {
+		delete(c.subscribers, ch)
+		close(ch)
+	}
+}
+
+func collectorSource() string {
+	if service.IsWindowsServiceProcess() {
+		return "service"
+	}
+	return "app"
 }
 
 func (c *Collector) sample(isSeed bool) RealtimePayload {
@@ -366,6 +385,7 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 
 	payload := RealtimePayload{
 		Timestamp:   unixNow,
+		Source:      collectorSource(),
 		TotalRxBps:  totalRxBps,
 		TotalTxBps:  totalTxBps,
 		TotalHist:   totalHistCopy,
