@@ -53,6 +53,7 @@
   const btnStayOnTop = document.getElementById("btnStayOnTop");
   const btnQuickTheme = document.getElementById("btnQuickTheme");
   const quickThemeLabel = document.getElementById("quickThemeLabel");
+  const dataSourceBadge = document.getElementById("dataSourceBadge");
 
   const THEMES = [
     { id: "dark", label: "Win11 Dark" },
@@ -1512,15 +1513,35 @@
     });
   }
 
+  function updateDataSourceBadge(source) {
+    if (!dataSourceBadge) return;
+    const isSvc = source === "service";
+    dataSourceBadge.textContent = isSvc ? "Source: Service" : "Source: App";
+    dataSourceBadge.classList.toggle("service", isSvc);
+    dataSourceBadge.classList.toggle("app", !isSvc);
+    dataSourceBadge.title = isSvc
+      ? "Data collected by Windows Background Service (TraffCountService)"
+      : "Data collected by standalone desktop application";
+  }
+
   // Windows Service Control
   async function fetchServiceStatus() {
     try {
-      const res = await fetch("/api/service");
-      if (!res.ok) return;
+      const [res, pingRes] = await Promise.all([
+        fetch("/api/service"),
+        fetch("/api/ping"),
+      ]);
+      if (pingRes && pingRes.ok) {
+        const p = await pingRes.json();
+        if (p.source) {
+          updateDataSourceBadge(p.source);
+        }
+      }
+      if (!res || !res.ok) return;
       const st = await res.json();
       updateServiceUI(st);
     } catch (e) {
-      console.error("Failed to query service status:", e);
+      // Ignore transient errors during port handover
     }
   }
 
@@ -1591,6 +1612,9 @@
       try {
         const payload = JSON.parse(ev.data);
         state.latestRealtime = payload;
+        if (payload.source) {
+          updateDataSourceBadge(payload.source);
+        }
         renderSidebarAdapters(payload);
         if (state.activeTab === "realtime") {
           renderRealtimeView();
@@ -1608,7 +1632,7 @@
     ws.onclose = () => {
       dot.classList.remove("online");
       txt.textContent = "Reconnecting...";
-      setTimeout(connectWebSocket, 1500);
+      setTimeout(connectWebSocket, 500);
     };
   }
 
