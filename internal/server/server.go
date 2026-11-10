@@ -202,16 +202,16 @@ func (s *Server) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%.4f", float64(tot)/1e9),
 		})
 	}
-	for _, a := range report.ByAdapter {
+	for _, a := range report.ByInterface {
 		_ = cw.Write([]string{
 			"ByAdapter",
-			a.FriendlyName,
+			a.Name,
 			strconv.FormatUint(a.RxBytes, 10),
 			strconv.FormatUint(a.TxBytes, 10),
-			strconv.FormatUint(a.Total, 10),
+			strconv.FormatUint(a.TotalBytes, 10),
 			fmt.Sprintf("%.4f", float64(a.RxBytes)/1e9),
 			fmt.Sprintf("%.4f", float64(a.TxBytes)/1e9),
-			fmt.Sprintf("%.4f", float64(a.Total)/1e9),
+			fmt.Sprintf("%.4f", float64(a.TotalBytes)/1e9),
 		})
 	}
 	cw.Flush()

@@ -1368,7 +1368,13 @@
   });
 
   function reportWindowBounds() {
-    if (window.outerWidth < 400 || window.outerHeight < 300 || window.screenX < -10000 || window.screenY < -10000) {
+    if (
+      state.miniMode ||
+      window.outerWidth < 450 ||
+      window.outerHeight < 320 ||
+      window.screenX < -10000 ||
+      window.screenY < -10000
+    ) {
       return;
     }
     const payload = JSON.stringify({
