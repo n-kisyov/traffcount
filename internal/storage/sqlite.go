@@ -25,9 +25,10 @@ type Settings struct {
 	RefreshRateMs  int     `json:"refreshRateMs"`  // Default 1000ms
 	DataCapEnabled bool    `json:"dataCapEnabled"` // Enable monthly/billing-cycle data cap
 	DataCapGB      float64 `json:"dataCapGB"`      // Monthly data cap in GB (e.g. 500)
-	DataCapIface   string  `json:"dataCapIface"`   // "all" or specific NIC ID
-	BillingDay     int     `json:"billingDay"`     // Day of month (1-28) when billing cycle resets
-	SpikeAlertMbps float64 `json:"spikeAlertMbps"` // Alert when sustained speed exceeds this Mbps (0 = disabled)
+	DataCapIface       string  `json:"dataCapIface"`       // "all" or specific NIC ID
+	BillingDay         int     `json:"billingDay"`         // Day of month (1-28) when billing cycle resets
+	SpikeAlertMbps     float64 `json:"spikeAlertMbps"`     // Alert when sustained speed exceeds this Mbps (0 = disabled)
+	NewAppAlertEnabled bool    `json:"newAppAlertEnabled"` // Notify when a new app accesses the network for the first time
 }
 
 // WindowBounds stores the last screen coordinates and size of the dashboard window.
@@ -97,6 +98,15 @@ type TrafficDelta struct {
 	Name        string
 	Description string
 	MAC         string
+	RxBytes     uint64
+	TxBytes     uint64
+	Timestamp   time.Time
+}
+
+// ProcessTrafficDelta holds accumulated bytes for an application process before flushing.
+type ProcessTrafficDelta struct {
+	ProcessName string
+	ExePath     string
 	RxBytes     uint64
 	TxBytes     uint64
 	Timestamp   time.Time
@@ -202,6 +212,25 @@ func (s *Store) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_traffic_hourly_ts ON traffic_hourly(bucket_ts);
+
+	CREATE TABLE IF NOT EXISTS process_traffic_hourly (
+		process_name TEXT NOT NULL,
+		exe_path TEXT NOT NULL DEFAULT '',
+		bucket_ts INTEGER NOT NULL,
+		rx_bytes INTEGER NOT NULL DEFAULT 0,
+		tx_bytes INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (process_name, bucket_ts)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_proc_traffic_ts ON process_traffic_hourly(bucket_ts);
+
+	CREATE TABLE IF NOT EXISTS known_apps (
+		process_name TEXT PRIMARY KEY,
+		exe_path TEXT NOT NULL DEFAULT '',
+		first_seen INTEGER NOT NULL,
+		last_seen INTEGER NOT NULL,
+		blocked INTEGER NOT NULL DEFAULT 0
+	);
 
 	CREATE TABLE IF NOT EXISTS settings (
 		key TEXT PRIMARY KEY,

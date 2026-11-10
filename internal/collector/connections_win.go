@@ -3,8 +3,11 @@
 package collector
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,9 +17,11 @@ import (
 
 	psnet "github.com/shirou/gopsutil/v4/net"
 	"golang.org/x/sys/windows"
+	"traffcount/internal/service"
+	"traffcount/internal/storage"
 )
 
-// ConnectionInfo represents an active TCP/UDP socket with its owning process, reverse DNS, and per-socket traffic counters.
+// ConnectionInfo represents an active TCP/UDP socket with its owning process, reverse DNS, GeoIP, and per-socket traffic counters.
 type ConnectionInfo struct {
 	Protocol    string `json:"protocol"`    // "TCP", "TCP6", "UDP", "UDP6"
 	LocalAddr   string `json:"localAddr"`   // e.g. "192.168.1.10:54321"
@@ -25,10 +30,13 @@ type ConnectionInfo struct {
 	RemoteAddr  string `json:"remoteAddr"`  // e.g. "142.250.185.78:443"
 	RemoteIP    string `json:"remoteIP"`    // e.g. "142.250.185.78"
 	RemoteHost  string `json:"remoteHost"`  // Asynchronous reverse-DNS hostname or provider label
+	CountryCode string `json:"countryCode"` // e.g. "US", "DE", "LAN"
+	GeoLabel    string `json:"geoLabel"`    // e.g. "US · Google LLC"
 	RemotePort  uint32 `json:"remotePort"`  // e.g. 443
 	State       string `json:"state"`       // "ESTABLISHED", "LISTEN", "TIME_WAIT", etc.
 	PID         int32  `json:"pid"`         // Owning Process ID
 	ProcessName string `json:"processName"` // e.g. "chrome.exe"
+	ExePath     string `json:"exePath"`     // Full executable path
 	RttMs       uint32 `json:"rttMs"`       // TCP smoothed RTT in ms (from GetPerTcpConnectionEStats)
 	RxBytes     uint64 `json:"rxBytes"`     // Cumulative inbound bytes on this TCP connection
 	TxBytes     uint64 `json:"txBytes"`     // Cumulative outbound bytes on this TCP connection
@@ -38,6 +46,8 @@ type ConnectionInfo struct {
 type ProcessConnSummary struct {
 	PID         int32  `json:"pid"`
 	ProcessName string `json:"processName"`
+	ExePath     string `json:"exePath"`
+	Blocked     bool   `json:"blocked"`
 	Established int    `json:"established"`
 	Listening   int    `json:"listening"`
 	Other       int    `json:"other"`
@@ -62,16 +72,20 @@ type ConnectionsSnapshot struct {
 
 type pidCacheEntry struct {
 	name      string
+	exePath   string
 	expiresAt time.Time
 }
 
 type dnsCacheEntry struct {
-	host      string
-	expiresAt time.Time
-	pending   bool
+	host        string
+	countryCode string
+	geoLabel    string
+	expiresAt   time.Time
+	pending     bool
 }
 
 type procTrafficTracker struct {
+	exePath      string
 	lastSocketRx map[string]uint64
 	lastSocketTx map[string]uint64
 	cumRx        uint64
@@ -88,12 +102,17 @@ var (
 	dnsMu    sync.Mutex
 	dnsCache = make(map[string]dnsCacheEntry)
 
-	procTrackMu sync.Mutex
-	procTrack   = make(map[string]*procTrafficTracker)
+	procTrackMu       sync.Mutex
+	procTrack         = make(map[string]*procTrafficTracker)
+	pendingProcDeltas = make(map[string]*storage.ProcessTrafficDelta)
+
+	blockedAppsMu sync.RWMutex
+	blockedApps   = make(map[string]bool)
 
 	iphlpapi                     = windows.NewLazySystemDLL("iphlpapi.dll")
 	procGetPerTcpConnectionEStat = iphlpapi.NewProc("GetPerTcpConnectionEStats")
 	procSetPerTcpConnectionEStat = iphlpapi.NewProc("SetPerTcpConnectionEStats")
+	procSetTcpEntry              = iphlpapi.NewProc("SetTcpEntry")
 )
 
 const (
@@ -223,14 +242,14 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 			snap.TimeWaitCount++
 		}
 
-		procName := resolveProcessName(st.Pid, now)
+		procName, exePath := resolveProcessIdentity(st.Pid, now)
 
 		localFormatted := formatEndpoint(st.Laddr.IP, st.Laddr.Port)
 		remoteFormatted := "—"
-		var remoteHost string
+		var remoteHost, countryCode, geoLabel string
 		if st.Raddr.IP != "" && st.Raddr.Port != 0 {
 			remoteFormatted = formatEndpoint(st.Raddr.IP, st.Raddr.Port)
-			remoteHost = lookupRemoteHostnameAsync(st.Raddr.IP, now)
+			remoteHost, countryCode, geoLabel = lookupRemoteHostAndGeoAsync(st.Raddr.IP, now)
 		}
 
 		var rxBytes, txBytes uint64
@@ -247,10 +266,13 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 			RemoteAddr:  remoteFormatted,
 			RemoteIP:    st.Raddr.IP,
 			RemoteHost:  remoteHost,
+			CountryCode: countryCode,
+			GeoLabel:    geoLabel,
 			RemotePort:  st.Raddr.Port,
 			State:       stateStr,
 			PID:         st.Pid,
 			ProcessName: procName,
+			ExePath:     exePath,
 			RttMs:       rttMs,
 			RxBytes:     rxBytes,
 			TxBytes:     txBytes,
@@ -259,9 +281,14 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 		key := fmt.Sprintf("%d_%s", st.Pid, procName)
 		ps, ok := procMap[key]
 		if !ok {
+			blockedAppsMu.RLock()
+			isBlocked := blockedApps[strings.ToLower(procName)]
+			blockedAppsMu.RUnlock()
 			ps = &ProcessConnSummary{
 				PID:         st.Pid,
 				ProcessName: procName,
+				ExePath:     exePath,
+				Blocked:     isBlocked,
 			}
 			procMap[key] = ps
 			curSocketRx[key] = make(map[string]uint64)
@@ -290,11 +317,21 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 		tr, exists := procTrack[key]
 		if !exists {
 			tr = &procTrafficTracker{
+				exePath:      ps.ExePath,
 				lastSocketRx: make(map[string]uint64),
 				lastSocketTx: make(map[string]uint64),
 				lastSample:   now,
 			}
 			procTrack[key] = tr
+			// Ensure newly seen applications with active sockets are queued for known_apps tracking
+			if ps.ProcessName != "" && !strings.HasPrefix(ps.ProcessName, "PID ") && ps.ProcessName != "System Idle" {
+				if _, ok := pendingProcDeltas[ps.ProcessName]; !ok {
+					pendingProcDeltas[ps.ProcessName] = &storage.ProcessTrafficDelta{
+						ProcessName: ps.ProcessName,
+						ExePath:     ps.ExePath,
+					}
+				}
+			}
 		}
 		elapsed := now.Sub(tr.lastSample).Seconds()
 		if elapsed >= 0.4 {
@@ -318,6 +355,22 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 			tr.lastSocketRx = curSocketRx[key]
 			tr.lastSocketTx = curSocketTx[key]
 			tr.lastSample = now
+
+			if (deltaRx > 0 || deltaTx > 0) && ps.ProcessName != "" {
+				pd, ok := pendingProcDeltas[ps.ProcessName]
+				if !ok {
+					pd = &storage.ProcessTrafficDelta{
+						ProcessName: ps.ProcessName,
+						ExePath:     ps.ExePath,
+					}
+					pendingProcDeltas[ps.ProcessName] = pd
+				}
+				pd.RxBytes += deltaRx
+				pd.TxBytes += deltaTx
+				if pd.ExePath == "" && ps.ExePath != "" {
+					pd.ExePath = ps.ExePath
+				}
+			}
 		}
 		ps.RxBps = tr.rxBps
 		ps.TxBps = tr.txBps
@@ -378,6 +431,110 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 	})
 
 	return snap
+}
+
+// TakePendingProcessDeltas drains accumulated per-application traffic deltas for SQLite persistence.
+func TakePendingProcessDeltas() []storage.ProcessTrafficDelta {
+	procTrackMu.Lock()
+	defer procTrackMu.Unlock()
+	if len(pendingProcDeltas) == 0 {
+		return nil
+	}
+	out := make([]storage.ProcessTrafficDelta, 0, len(pendingProcDeltas))
+	for _, v := range pendingProcDeltas {
+		out = append(out, *v)
+	}
+	pendingProcDeltas = make(map[string]*storage.ProcessTrafficDelta)
+	return out
+}
+
+// SetBlockedAppsCache updates the in-memory firewall block map used when building snapshots.
+func SetBlockedAppsCache(m map[string]bool) {
+	blockedAppsMu.Lock()
+	defer blockedAppsMu.Unlock()
+	next := make(map[string]bool, len(m))
+	for k, v := range m {
+		next[strings.ToLower(k)] = v
+	}
+	blockedApps = next
+}
+
+// CloseTCPConnectionV4 forcefully closes an established IPv4 TCP socket using SetTcpEntry (MIB_TCP_STATE_DELETE_TCB = 12).
+func CloseTCPConnectionV4(localIP string, localPort uint32, remoteIP string, remotePort uint32) error {
+	lip := net.ParseIP(localIP).To4()
+	rip := net.ParseIP(remoteIP).To4()
+	if lip == nil || rip == nil {
+		return fmt.Errorf("only IPv4 TCP sockets can be closed via SetTcpEntry")
+	}
+	row := mibTcpRow{
+		State:      12, // MIB_TCP_STATE_DELETE_TCB
+		LocalAddr:  *(*uint32)(unsafe.Pointer(&lip[0])),
+		LocalPort:  htons32(uint16(localPort)),
+		RemoteAddr: *(*uint32)(unsafe.Pointer(&rip[0])),
+		RemotePort: htons32(uint16(remotePort)),
+	}
+	ret, _, _ := procSetTcpEntry.Call(uintptr(unsafe.Pointer(&row)))
+	if ret != 0 {
+		return fmt.Errorf("SetTcpEntry failed with code %d (requires Administrator privileges)", ret)
+	}
+	return nil
+}
+
+// TerminateProcessByPID terminates a process by PID.
+func TerminateProcessByPID(pid int32) error {
+	if pid <= 4 {
+		return fmt.Errorf("cannot terminate system process PID %d", pid)
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
+	if err != nil {
+		return fmt.Errorf("OpenProcess failed (requires Administrator privileges): %w", err)
+	}
+	defer windows.CloseHandle(h)
+	if err := windows.TerminateProcess(h, 1); err != nil {
+		return fmt.Errorf("TerminateProcess failed: %w", err)
+	}
+	return nil
+}
+
+// SetFirewallBlockRule creates or deletes a Windows Defender Firewall outbound+inbound block rule for an executable.
+func SetFirewallBlockRule(processName, exePath string, block bool) error {
+	cleanName := strings.ReplaceAll(processName, `"`, "")
+	if cleanName == "" {
+		return fmt.Errorf("process name is required")
+	}
+	ruleOut := "TraffCount_Block_Out_" + cleanName
+	ruleIn := "TraffCount_Block_In_" + cleanName
+
+	// Always remove existing rules first to avoid duplicates
+	_ = runNetshFirewall("advfirewall", "firewall", "delete", "rule", "name="+ruleOut)
+	_ = runNetshFirewall("advfirewall", "firewall", "delete", "rule", "name="+ruleIn)
+
+	if !block {
+		return nil
+	}
+	if exePath == "" {
+		return fmt.Errorf("executable path is unknown for %s (cannot create path-based firewall rule)", processName)
+	}
+
+	if err := runNetshFirewall("advfirewall", "firewall", "add", "rule",
+		"name="+ruleOut, "dir=out", "action=block", "program="+exePath, "enable=yes"); err != nil {
+		return err
+	}
+	_ = runNetshFirewall("advfirewall", "firewall", "add", "rule",
+		"name="+ruleIn, "dir=in", "action=block", "program="+exePath, "enable=yes")
+	return nil
+}
+
+func runNetshFirewall(args ...string) error {
+	cmd := exec.Command("netsh", args...)
+	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if !service.IsAdmin() {
+			return fmt.Errorf("Administrator privileges required to modify Windows Firewall (%s)", strings.TrimSpace(string(out)))
+		}
+		return fmt.Errorf("netsh failed: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func queryTCPEStatsV4(localIP string, localPort uint32, remoteIP string, remotePort uint32) (rxBytes uint64, txBytes uint64, rttMs uint32) {
@@ -449,19 +606,23 @@ func htons32(p uint16) uint32 {
 	return uint32((p>>8)&0xff) | uint32((p&0xff)<<8)
 }
 
-func lookupRemoteHostnameAsync(ip string, now time.Time) string {
+var geoHTTPClient = &http.Client{Timeout: 2500 * time.Millisecond}
+
+func lookupRemoteHostAndGeoAsync(ip string, now time.Time) (string, string, string) {
 	if ip == "" || ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" {
-		return "localhost"
+		return "localhost", "LO", "Loopback"
 	}
+	hostHint, ccHint, geoHint := classifyWellKnownIP(ip)
+
 	dnsMu.Lock()
 	entry, ok := dnsCache[ip]
 	if ok && now.Before(entry.expiresAt) {
 		dnsMu.Unlock()
-		return entry.host
+		return entry.host, entry.countryCode, entry.geoLabel
 	}
 	if ok && entry.pending {
 		dnsMu.Unlock()
-		return entry.host
+		return entry.host, entry.countryCode, entry.geoLabel
 	}
 	if len(dnsCache) > 512 {
 		for k, v := range dnsCache {
@@ -471,48 +632,98 @@ func lookupRemoteHostnameAsync(ip string, now time.Time) string {
 		}
 	}
 	dnsCache[ip] = dnsCacheEntry{
-		host:      classifyWellKnownIP(ip),
-		expiresAt: now.Add(5 * time.Minute),
-		pending:   true,
+		host:        hostHint,
+		countryCode: ccHint,
+		geoLabel:    geoHint,
+		expiresAt:   now.Add(10 * time.Minute),
+		pending:     true,
 	}
 	dnsMu.Unlock()
 
-	go func(targetIP string) {
+	go func(targetIP, defHost, defCC, defGeo string) {
+		resolvedHost := defHost
 		names, err := net.LookupAddr(targetIP)
-		resolved := classifyWellKnownIP(targetIP)
 		if err == nil && len(names) > 0 {
-			resolved = strings.TrimSuffix(names[0], ".")
+			resolvedHost = strings.TrimSuffix(names[0], ".")
 		}
+
+		cc := defCC
+		geo := defGeo
+		if cc == "" && !isPrivateOrLocalIP(targetIP) {
+			if apiCC, apiOrg := queryIPWhois(targetIP); apiCC != "" {
+				cc = apiCC
+				if apiOrg != "" {
+					geo = apiCC + " · " + apiOrg
+				} else {
+					geo = apiCC
+				}
+			}
+		}
+
 		dnsMu.Lock()
 		dnsCache[targetIP] = dnsCacheEntry{
-			host:      resolved,
-			expiresAt: time.Now().Add(10 * time.Minute),
-			pending:   false,
+			host:        resolvedHost,
+			countryCode: cc,
+			geoLabel:    geo,
+			expiresAt:   time.Now().Add(30 * time.Minute),
+			pending:     false,
 		}
 		dnsMu.Unlock()
-	}(ip)
+	}(ip, hostHint, ccHint, geoHint)
 
-	return classifyWellKnownIP(ip)
+	return hostHint, ccHint, geoHint
 }
 
-func classifyWellKnownIP(ip string) string {
+func isPrivateOrLocalIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+func queryIPWhois(ip string) (countryCode string, org string) {
+	resp, err := geoHTTPClient.Get("https://ipwho.is/" + ip)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Success     bool   `json:"success"`
+		CountryCode string `json:"country_code"`
+		Connection  struct {
+			Org string `json:"org"`
+			ISP string `json:"isp"`
+		} `json:"connection"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil || !payload.Success {
+		return "", ""
+	}
+	orgName := payload.Connection.Org
+	if orgName == "" {
+		orgName = payload.Connection.ISP
+	}
+	return payload.CountryCode, orgName
+}
+
+func classifyWellKnownIP(ip string) (host, cc, geo string) {
 	switch {
 	case strings.HasPrefix(ip, "127.") || ip == "::1":
-		return "localhost"
-	case strings.HasPrefix(ip, "192.168.") || strings.HasPrefix(ip, "10.") || strings.HasPrefix(ip, "172.16.") || strings.HasPrefix(ip, "172.30."):
-		return "Local LAN"
+		return "localhost", "LO", "Loopback"
+	case isPrivateOrLocalIP(ip):
+		return "Local LAN", "LAN", "Local Network"
 	case ip == "1.1.1.1" || ip == "1.0.0.1":
-		return "one.one.one.one (Cloudflare)"
+		return "one.one.one.one", "US", "US · Cloudflare DNS"
 	case ip == "8.8.8.8" || ip == "8.8.4.4":
-		return "dns.google"
+		return "dns.google", "US", "US · Google DNS"
 	case strings.HasPrefix(ip, "142.250.") || strings.HasPrefix(ip, "172.217."):
-		return "Google Cloud / Edge"
+		return "Google Edge", "US", "US · Google LLC"
 	case strings.HasPrefix(ip, "20.") || strings.HasPrefix(ip, "13.") || strings.HasPrefix(ip, "40.") || strings.HasPrefix(ip, "52."):
-		return "Microsoft / Cloud"
+		return "Microsoft Cloud", "US", "US · Microsoft Azure"
 	case strings.HasPrefix(ip, "104.16.") || strings.HasPrefix(ip, "104.18.") || strings.HasPrefix(ip, "172.64."):
-		return "Cloudflare CDN"
+		return "Cloudflare CDN", "US", "US · Cloudflare"
 	default:
-		return ""
+		return "", "", ""
 	}
 }
 
@@ -523,22 +734,22 @@ func formatEndpoint(ip string, port uint32) string {
 	return fmt.Sprintf("%s:%d", ip, port)
 }
 
-func resolveProcessName(pid int32, now time.Time) string {
+func resolveProcessIdentity(pid int32, now time.Time) (string, string) {
 	if pid == 0 {
-		return "System Idle"
+		return "System Idle", ""
 	}
 	if pid == 4 {
-		return "System"
+		return "System", "ntoskrnl.exe"
 	}
 
 	pidMu.Lock()
 	if entry, ok := pidCache[pid]; ok && now.Before(entry.expiresAt) {
 		pidMu.Unlock()
-		return entry.name
+		return entry.name, entry.exePath
 	}
 	pidMu.Unlock()
 
-	name := queryProcessImageName(uint32(pid))
+	name, fullPath := queryProcessImageNameAndPath(uint32(pid))
 	if name == "" {
 		name = fmt.Sprintf("PID %d", pid)
 	}
@@ -553,16 +764,17 @@ func resolveProcessName(pid int32, now time.Time) string {
 	}
 	pidCache[pid] = pidCacheEntry{
 		name:      name,
+		exePath:   fullPath,
 		expiresAt: now.Add(30 * time.Second),
 	}
 	pidMu.Unlock()
-	return name
+	return name, fullPath
 }
 
-func queryProcessImageName(pid uint32) string {
+func queryProcessImageNameAndPath(pid uint32) (string, string) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer windows.CloseHandle(h)
 
@@ -570,8 +782,8 @@ func queryProcessImageName(pid uint32) string {
 	size := uint32(len(buf))
 	err = windows.QueryFullProcessImageName(h, 0, &buf[0], &size)
 	if err != nil || size == 0 {
-		return ""
+		return "", ""
 	}
 	fullPath := windows.UTF16ToString(buf[:size])
-	return filepath.Base(fullPath)
+	return filepath.Base(fullPath), fullPath
 }

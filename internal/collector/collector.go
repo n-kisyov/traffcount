@@ -93,6 +93,10 @@ type Collector struct {
 
 	subMu       sync.Mutex
 	subscribers map[chan RealtimePayload]struct{}
+
+	alertMu      sync.Mutex
+	newAppAlerts []string
+	appsSeeded   bool
 }
 
 // New creates a new Collector backed by the provided SQLite Store.
@@ -102,6 +106,11 @@ func New(store *storage.Store) *Collector {
 	for i := 0; i < RingBufferSize; i++ {
 		initHist[i] = RatePoint{Timestamp: now - int64(RingBufferSize-1-i)}
 	}
+	if store != nil {
+		if blocked, err := store.GetBlockedApps(); err == nil {
+			SetBlockedAppsCache(blocked)
+		}
+	}
 	return &Collector{
 		store:       store,
 		counters:    make(map[string]*rawCounter),
@@ -110,6 +119,18 @@ func New(store *storage.Store) *Collector {
 		pendingDB:   make(map[string]*storage.TrafficDelta),
 		subscribers: make(map[chan RealtimePayload]struct{}),
 	}
+}
+
+// PopNewAppAlerts returns and clears any newly detected network applications for tray notifications.
+func (c *Collector) PopNewAppAlerts() []string {
+	c.alertMu.Lock()
+	defer c.alertMu.Unlock()
+	if len(c.newAppAlerts) == 0 {
+		return nil
+	}
+	out := c.newAppAlerts
+	c.newAppAlerts = nil
+	return out
 }
 
 // Subscribe returns a channel that receives 1Hz RealtimePayload updates.
@@ -137,18 +158,24 @@ func (c *Collector) LatestSnapshot() RealtimePayload {
 	return c.lastPayload
 }
 
-// Run starts the 1Hz polling loop and 30-second SQLite flush loop until ctx is canceled.
+// Run starts the 1Hz polling loop and 15-second SQLite flush loop until ctx is canceled.
 func (c *Collector) Run(ctx context.Context) {
 	// Initial sample to seed counters and connectivity probe
 	go ProbeConnectivity()
+	go func() {
+		_ = GetActiveConnections("", false)
+		c.FlushToDB()
+	}()
 	c.sample(true)
 
 	pollTicker := time.NewTicker(1 * time.Second)
 	flushTicker := time.NewTicker(15 * time.Second)
 	diagTicker := time.NewTicker(3 * time.Second)
+	procTicker := time.NewTicker(4 * time.Second)
 	defer pollTicker.Stop()
 	defer flushTicker.Stop()
 	defer diagTicker.Stop()
+	defer procTicker.Stop()
 
 	for {
 		select {
@@ -162,6 +189,10 @@ func (c *Collector) Run(ctx context.Context) {
 			c.FlushToDB()
 		case <-diagTicker.C:
 			go ProbeConnectivity()
+		case <-procTicker.C:
+			go func() {
+				_ = GetActiveConnections("", false)
+			}()
 		}
 	}
 }
@@ -345,20 +376,40 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 	return payload
 }
 
-// FlushToDB writes accumulated traffic deltas to SQLite.
+// FlushToDB writes accumulated traffic deltas and per-application traffic deltas to SQLite.
 func (c *Collector) FlushToDB() {
 	c.mu.Lock()
-	if len(c.pendingDB) == 0 {
-		c.mu.Unlock()
-		return
+	var batch []storage.TrafficDelta
+	if len(c.pendingDB) > 0 {
+		batch = make([]storage.TrafficDelta, 0, len(c.pendingDB))
+		for _, d := range c.pendingDB {
+			batch = append(batch, *d)
+		}
+		c.pendingDB = make(map[string]*storage.TrafficDelta)
 	}
-	batch := make([]storage.TrafficDelta, 0, len(c.pendingDB))
-	for _, d := range c.pendingDB {
-		batch = append(batch, *d)
-	}
-	c.pendingDB = make(map[string]*storage.TrafficDelta)
 	c.mu.Unlock()
 
-	_ = c.store.RecordTrafficBatch(batch)
+	if len(batch) > 0 {
+		_ = c.store.RecordTrafficBatch(batch)
+	}
+
+	procDeltas := TakePendingProcessDeltas()
+	if len(procDeltas) > 0 {
+		newApps, err := c.store.RecordProcessTrafficBatch(procDeltas)
+		if err == nil {
+			c.alertMu.Lock()
+			if c.appsSeeded && len(newApps) > 0 {
+				settings, _ := c.store.GetSettings()
+				if settings.NewAppAlertEnabled {
+					c.newAppAlerts = append(c.newAppAlerts, newApps...)
+					if len(c.newAppAlerts) > 20 {
+						c.newAppAlerts = c.newAppAlerts[len(c.newAppAlerts)-20:]
+					}
+				}
+			}
+			c.appsSeeded = true
+			c.alertMu.Unlock()
+		}
+	}
 }
 

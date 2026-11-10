@@ -27,18 +27,30 @@ type InterfaceSummary struct {
 	SharePct    float64 `json:"sharePct"`
 }
 
+// ProcessHistorySummary represents historical traffic totals for a single application process.
+type ProcessHistorySummary struct {
+	ProcessName string  `json:"processName"`
+	ExePath     string  `json:"exePath"`
+	RxBytes     uint64  `json:"rxBytes"`
+	TxBytes     uint64  `json:"txBytes"`
+	TotalBytes  uint64  `json:"totalBytes"`
+	SharePct    float64 `json:"sharePct"`
+	Blocked     bool    `json:"blocked"`
+}
+
 // HistoryReport is returned by QueryHistory for the dashboard.
 type HistoryReport struct {
-	StartTime     int64              `json:"startTime"`
-	EndTime       int64              `json:"endTime"`
-	Granularity   string             `json:"granularity"` // "hour" or "day"
-	SelectedIface string             `json:"selectedIface"`
-	TotalRxBytes  uint64             `json:"totalRxBytes"`
-	TotalTxBytes  uint64             `json:"totalTxBytes"`
-	CombinedBytes uint64             `json:"combinedBytes"`
-	AvgDailyBytes uint64             `json:"avgDailyBytes"`
-	Series        []BucketPoint      `json:"series"`
-	ByInterface   []InterfaceSummary `json:"byInterface"`
+	StartTime     int64                   `json:"startTime"`
+	EndTime       int64                   `json:"endTime"`
+	Granularity   string                  `json:"granularity"` // "hour" or "day"
+	SelectedIface string                  `json:"selectedIface"`
+	TotalRxBytes  uint64                  `json:"totalRxBytes"`
+	TotalTxBytes  uint64                  `json:"totalTxBytes"`
+	CombinedBytes uint64                  `json:"combinedBytes"`
+	AvgDailyBytes uint64                  `json:"avgDailyBytes"`
+	Series        []BucketPoint           `json:"series"`
+	ByInterface   []InterfaceSummary      `json:"byInterface"`
+	ByProcess     []ProcessHistorySummary `json:"byProcess"`
 }
 
 // TruncateToHour truncates a timestamp to the start of its UTC/local hour.
@@ -108,6 +120,86 @@ func (s *Store) RecordTrafficBatch(deltas []TrafficDelta) error {
 	}
 
 	return tx.Commit()
+}
+
+// RecordProcessTrafficBatch records hourly per-process traffic deltas and detects newly seen applications.
+func (s *Store) RecordProcessTrafficBatch(deltas []ProcessTrafficDelta) ([]string, error) {
+	if len(deltas) == 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var existingCount int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM known_apps`).Scan(&existingCount)
+	isInitialSeed := existingCount == 0
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	checkStmt, err := tx.Prepare(`SELECT 1 FROM known_apps WHERE process_name = ?`)
+	if err != nil {
+		return nil, err
+	}
+	defer checkStmt.Close()
+
+	appStmt, err := tx.Prepare(`
+		INSERT INTO known_apps (process_name, exe_path, first_seen, last_seen, blocked)
+		VALUES (?, ?, ?, ?, 0)
+		ON CONFLICT(process_name) DO UPDATE SET
+			exe_path = CASE WHEN excluded.exe_path != '' THEN excluded.exe_path ELSE known_apps.exe_path END,
+			last_seen = excluded.last_seen
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer appStmt.Close()
+
+	trafficStmt, err := tx.Prepare(`
+		INSERT INTO process_traffic_hourly (process_name, exe_path, bucket_ts, rx_bytes, tx_bytes)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(process_name, bucket_ts) DO UPDATE SET
+			exe_path = CASE WHEN excluded.exe_path != '' THEN excluded.exe_path ELSE process_traffic_hourly.exe_path END,
+			rx_bytes = process_traffic_hourly.rx_bytes + excluded.rx_bytes,
+			tx_bytes = process_traffic_hourly.tx_bytes + excluded.tx_bytes
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer trafficStmt.Close()
+
+	var newApps []string
+	for _, d := range deltas {
+		if d.ProcessName == "" || d.ProcessName == "System Idle" {
+			continue
+		}
+		ts := d.Timestamp
+		if ts.IsZero() {
+			ts = time.Now()
+		}
+		unixNow := ts.Unix()
+		bucketTS := TruncateToHour(ts)
+
+		var dummy int
+		err := checkStmt.QueryRow(d.ProcessName).Scan(&dummy)
+		if err != nil && !isInitialSeed {
+			newApps = append(newApps, d.ProcessName)
+		}
+
+		_, _ = appStmt.Exec(d.ProcessName, d.ExePath, unixNow, unixNow)
+		if d.RxBytes > 0 || d.TxBytes > 0 {
+			_, _ = trafficStmt.Exec(d.ProcessName, d.ExePath, bucketTS, d.RxBytes, d.TxBytes)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return newApps, nil
 }
 
 // ListInterfaces returns all known interfaces from SQLite.
@@ -317,6 +409,43 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 	}
 	report.AvgDailyBytes = uint64(float64(report.CombinedBytes) / days)
 
+	// 3. Per-application historical traffic breakdown
+	report.ByProcess = []ProcessHistorySummary{}
+	procRows, err := s.db.Query(`
+		SELECT
+			p.process_name,
+			MAX(COALESCE(NULLIF(p.exe_path, ''), COALESCE(k.exe_path, ''))) AS exe_path,
+			SUM(p.rx_bytes) AS rx,
+			SUM(p.tx_bytes) AS tx,
+			COALESCE(MAX(k.blocked), 0) AS blocked
+		FROM process_traffic_hourly p
+		LEFT JOIN known_apps k ON k.process_name = p.process_name
+		WHERE p.bucket_ts >= ? AND p.bucket_ts <= ?
+		GROUP BY p.process_name
+		HAVING (SUM(p.rx_bytes) + SUM(p.tx_bytes)) > 0
+		ORDER BY (SUM(p.rx_bytes) + SUM(p.tx_bytes)) DESC
+		LIMIT 50
+	`, startTS, endTS)
+	if err == nil {
+		defer procRows.Close()
+		var grandTotalProcs uint64
+		for procRows.Next() {
+			var item ProcessHistorySummary
+			var blockedInt int
+			if err := procRows.Scan(&item.ProcessName, &item.ExePath, &item.RxBytes, &item.TxBytes, &blockedInt); err == nil {
+				item.TotalBytes = item.RxBytes + item.TxBytes
+				item.Blocked = blockedInt != 0
+				grandTotalProcs += item.TotalBytes
+				report.ByProcess = append(report.ByProcess, item)
+			}
+		}
+		for idx := range report.ByProcess {
+			if grandTotalProcs > 0 {
+				report.ByProcess[idx].SharePct = (float64(report.ByProcess[idx].TotalBytes) / float64(grandTotalProcs)) * 100.0
+			}
+		}
+	}
+
 	return report, nil
 }
 
@@ -329,9 +458,11 @@ type QuotaStatus struct {
 	CycleLabel    string  `json:"cycleLabel"`
 	CapBytes      uint64  `json:"capBytes"`
 	CapGB         float64 `json:"capGB"`
+	CapGb         float64 `json:"capGb"`
 	UsedRxBytes   uint64  `json:"usedRxBytes"`
 	UsedTxBytes   uint64  `json:"usedTxBytes"`
 	UsedTotal     uint64  `json:"usedTotal"`
+	UsedBytes     uint64  `json:"usedBytes"`
 	UsedPct       float64 `json:"usedPct"`
 	Over80        bool    `json:"over80"`
 	Over100       bool    `json:"over100"`
@@ -368,6 +499,7 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 		CycleLabel: fmt.Sprintf("Since %s", cycleStart.Format("Jan 02")),
 		CapBytes:   capBytes,
 		CapGB:      cfg.DataCapGB,
+		CapGb:      cfg.DataCapGB,
 	}
 
 	s.mu.RLock()
@@ -391,12 +523,67 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 	qs.UsedRxBytes = rx
 	qs.UsedTxBytes = tx
 	qs.UsedTotal = rx + tx
+	qs.UsedBytes = rx + tx
 	if capBytes > 0 {
 		qs.UsedPct = (float64(qs.UsedTotal) / float64(capBytes)) * 100.0
 		qs.Over80 = qs.UsedPct >= 80.0
 		qs.Over100 = qs.UsedPct >= 100.0
 	}
 	return qs, nil
+}
+
+// SetAppBlocked records whether an application is blocked in Windows Firewall.
+func (s *Store) SetAppBlocked(processName, exePath string, blocked bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().Unix()
+	bVal := 0
+	if blocked {
+		bVal = 1
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO known_apps (process_name, exe_path, first_seen, last_seen, blocked)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(process_name) DO UPDATE SET
+			exe_path = CASE WHEN excluded.exe_path != '' THEN excluded.exe_path ELSE known_apps.exe_path END,
+			last_seen = excluded.last_seen,
+			blocked = excluded.blocked
+	`, processName, exePath, now, now, bVal)
+	return err
+}
+
+// GetBlockedApps returns a map of processName -> true for all blocked applications.
+func (s *Store) GetBlockedApps() (map[string]bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT process_name FROM known_apps WHERE blocked = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	res := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err == nil {
+			res[name] = true
+		}
+	}
+	return res, nil
+}
+
+// ResetTrafficHistory clears all historical hourly traffic and process traffic counters.
+func (s *Store) ResetTrafficHistory() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		DELETE FROM traffic_hourly;
+		DELETE FROM process_traffic_hourly;
+	`)
+	return err
 }
 
 // PruneOldData deletes traffic buckets older than retentionDays.
@@ -408,6 +595,7 @@ func (s *Store) PruneOldData(retentionDays int) error {
 	defer s.mu.Unlock()
 
 	cutoff := time.Now().AddDate(0, 0, -retentionDays).Unix()
+	_, _ = s.db.Exec(`DELETE FROM process_traffic_hourly WHERE bucket_ts < ?`, cutoff)
 	_, err := s.db.Exec(`DELETE FROM traffic_hourly WHERE bucket_ts < ?`, cutoff)
 	return err
 }
