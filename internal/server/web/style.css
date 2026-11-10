@@ -332,6 +332,32 @@ body {
   box-shadow: 0 0 8px var(--success);
 }
 
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  transition: all 0.18s ease;
+}
+
+.source-badge.service {
+  background: var(--accent-primary-bg);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.source-badge.app {
+  background: var(--bg-surface);
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
 /* Main Content */
 .main-content {
   display: flex;
