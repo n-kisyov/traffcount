@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -54,6 +55,12 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/api/ping", s.handlePing)
 	mux.HandleFunc("/api/realtime", s.handleRealtime)
 	mux.HandleFunc("/api/connections", s.handleConnections)
+	mux.HandleFunc("/api/connections/action", s.handleConnectionsAction)
+	mux.HandleFunc("/api/firewall/block", s.handleFirewallBlock)
+	mux.HandleFunc("/api/speedtest", s.handleSpeedTest)
+	mux.HandleFunc("/api/db/backup", s.handleDBBackup)
+	mux.HandleFunc("/api/db/reset", s.handleDBReset)
+	mux.HandleFunc("/api/alerts/new-apps", s.handleAlertsNewApps)
 	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/history/export", s.handleHistoryExport)
@@ -215,6 +222,18 @@ func (s *Server) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%.4f", float64(a.TotalBytes)/1e9),
 		})
 	}
+	for _, p := range report.ByProcess {
+		_ = cw.Write([]string{
+			"ByApplication",
+			p.ProcessName,
+			strconv.FormatUint(p.RxBytes, 10),
+			strconv.FormatUint(p.TxBytes, 10),
+			strconv.FormatUint(p.TotalBytes, 10),
+			fmt.Sprintf("%.4f", float64(p.RxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(p.TxBytes)/1e9),
+			fmt.Sprintf("%.4f", float64(p.TotalBytes)/1e9),
+		})
+	}
 	cw.Flush()
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
@@ -265,6 +284,115 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	includeUDP := q.Get("udp") == "1" || q.Get("udp") == "true"
 	snap := collector.GetActiveConnections(filterIP, includeUDP)
 	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) handleConnectionsAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Action     string `json:"action"` // "close_socket" or "kill_process"
+		LocalIP    string `json:"localIP"`
+		LocalPort  uint32 `json:"localPort"`
+		RemoteIP   string `json:"remoteIP"`
+		RemotePort uint32 `json:"remotePort"`
+		PID        int32  `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+
+	var err error
+	switch req.Action {
+	case "close_socket":
+		err = collector.CloseTCPConnectionV4(req.LocalIP, req.LocalPort, req.RemoteIP, req.RemotePort)
+	case "kill_process":
+		err = collector.TerminateProcessByPID(req.PID)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown action"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleFirewallBlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ProcessName string `json:"processName"`
+		ExePath     string `json:"exePath"`
+		Blocked     bool   `json:"blocked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if err := collector.SetFirewallBlockRule(req.ProcessName, req.ExePath, req.Blocked); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.store.SetAppBlocked(req.ProcessName, req.ExePath, req.Blocked); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if blockedMap, err := s.store.GetBlockedApps(); err == nil {
+		collector.SetBlockedAppsCache(blockedMap)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"processName": req.ProcessName,
+		"blocked":     req.Blocked,
+	})
+}
+
+func (s *Server) handleSpeedTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	res := collector.RunSpeedTest(r.Context())
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleDBBackup(w http.ResponseWriter, r *http.Request) {
+	s.collector.FlushToDB()
+	dbPath := s.store.DBPath()
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="traffcount-backup-%s.db"`, time.Now().Format("20060102-150405")))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) handleDBReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.store.ResetTrafficHistory(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleAlertsNewApps(w http.ResponseWriter, r *http.Request) {
+	apps := s.collector.PopNewAppAlerts()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"newApps": apps,
+	})
 }
 
 func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
