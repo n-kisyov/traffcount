@@ -20,18 +20,23 @@ import (
 const WindowTitlePrefix = "TraffCount — Network Monitor"
 
 var (
-	user32              = windows.NewLazySystemDLL("user32.dll")
-	procEnumWindows     = user32.NewProc("EnumWindows")
-	procGetWindowTextW  = user32.NewProc("GetWindowTextW")
-	procSetWindowPos    = user32.NewProc("SetWindowPos")
-	procGetWindowRect   = user32.NewProc("GetWindowRect")
-	procSetForeground   = user32.NewProc("SetForegroundWindow")
-	procShowWindow      = user32.NewProc("ShowWindow")
-	procPostMessageW    = user32.NewProc("PostMessageW")
-	procIsWindowVisible = user32.NewProc("IsWindowVisible")
-	procIsIconic        = user32.NewProc("IsIconic")
-	procIsZoomed        = user32.NewProc("IsZoomed")
-	procGetWindowLongW  = user32.NewProc("GetWindowLongW")
+	user32                  = windows.NewLazySystemDLL("user32.dll")
+	procEnumWindows         = user32.NewProc("EnumWindows")
+	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
+	procSetWindowPos        = user32.NewProc("SetWindowPos")
+	procGetWindowRect       = user32.NewProc("GetWindowRect")
+	procGetWindowPlacement  = user32.NewProc("GetWindowPlacement")
+	procSetWindowPlacement  = user32.NewProc("SetWindowPlacement")
+	procSetForeground       = user32.NewProc("SetForegroundWindow")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procPostMessageW        = user32.NewProc("PostMessageW")
+	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
+	procIsIconic            = user32.NewProc("IsIconic")
+	procIsZoomed            = user32.NewProc("IsZoomed")
+	procGetWindowLongW      = user32.NewProc("GetWindowLongW")
+
+	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 const (
@@ -43,7 +48,9 @@ const (
 	SWP_FRAMECHANGED = 0x0020
 	SWP_SHOWWINDOW   = 0x0040
 	SW_HIDE          = 0
+	SW_SHOWNORMAL    = 1
 	SW_MAXIMIZE      = 3
+	SW_SHOWMAXIMIZED = 3
 	SW_SHOW          = 5
 	SW_RESTORE       = 9
 	HWND_TOPMOST     = ^uintptr(0)     // -1
@@ -51,9 +58,22 @@ const (
 
 	GWL_EXSTYLE      = -20
 	WS_EX_TOPMOST    = 0x00000008
+
+	WPF_RESTORETOMAXIMIZED        = 0x0002
+	WPF_ASYNCWINDOWPLACEMENT      = 0x0004
+	DWMWA_TRANSITIONS_FORCEDISABLED = 3
+
+	miniWindowWidth   = 380
+	miniWindowHeight  = 230
+	minimizeHideDelay = 200 * time.Millisecond
 )
 
 var enumMu sync.Mutex
+
+type winPoint struct {
+	X int32
+	Y int32
+}
 
 type winRect struct {
 	Left   int32
@@ -62,14 +82,27 @@ type winRect struct {
 	Bottom int32
 }
 
+type windowPlacement struct {
+	Length           uint32
+	Flags            uint32
+	ShowCmd          uint32
+	PtMinPosition    winPoint
+	PtMaxPosition    winPoint
+	RcNormalPosition winRect
+}
+
 // Manager controls the GUI app window, its Always-On-Top ("Stay on Top") state, and saved window bounds.
 type Manager struct {
 	mu          sync.Mutex
 	url         string
 	alwaysOnTop bool
 	miniMode    bool
+	miniHasPos  bool
+	miniX       int
+	miniY       int
 	bounds      storage.WindowBounds
 	launching   bool
+	iconicSince map[uintptr]time.Time
 }
 
 // NewManager creates a window manager for the given local dashboard URL.
@@ -78,6 +111,7 @@ func NewManager(url string, initialTopmost bool) *Manager {
 		url:         url,
 		alwaysOnTop: initialTopmost,
 		bounds:      storage.DefaultWindowBounds(),
+		iconicSince: make(map[uintptr]time.Time),
 	}
 }
 
@@ -98,14 +132,12 @@ func (m *Manager) GetSavedBounds() storage.WindowBounds {
 }
 
 // CaptureLiveWindowBounds inspects any currently open normal (non-minimized) TraffCount window
-// on the desktop and updates m.bounds if found.
+// on the desktop and updates m.bounds if found. When in mini-widget mode, it updates the remembered
+// mini-widget position without overwriting normal window bounds.
 func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
 	m.mu.Lock()
 	inMini := m.miniMode
 	m.mu.Unlock()
-	if inMini {
-		return storage.WindowBounds{}, false
-	}
 
 	hwnd := FindTraffCountWindow()
 	if hwnd == 0 {
@@ -113,10 +145,9 @@ func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
 	}
 	iconic, _, _ := procIsIconic.Call(hwnd)
 	if iconic != 0 {
-		// Don't overwrite normal window bounds while minimized to taskbar (-32000,-32000)
+		// Don't overwrite window bounds while minimized to taskbar (-32000,-32000)
 		return storage.WindowBounds{}, false
 	}
-	zoomed, _, _ := procIsZoomed.Call(hwnd)
 	var r winRect
 	ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
 	if ret == 0 {
@@ -124,6 +155,19 @@ func (m *Manager) CaptureLiveWindowBounds() (storage.WindowBounds, bool) {
 	}
 	w := int(r.Right - r.Left)
 	h := int(r.Bottom - r.Top)
+
+	if inMini {
+		if w > 0 && w <= 440 && h > 0 && h <= 280 && r.Left > -3000 && r.Top > -3000 {
+			m.mu.Lock()
+			m.miniX = int(r.Left)
+			m.miniY = int(r.Top)
+			m.miniHasPos = true
+			m.mu.Unlock()
+		}
+		return storage.WindowBounds{}, false
+	}
+
+	zoomed, _, _ := procIsZoomed.Call(hwnd)
 	if w < 450 || h < 320 {
 		return storage.WindowBounds{}, false
 	}
@@ -157,39 +201,63 @@ func (m *Manager) IsMiniMode() bool {
 // or restores its normal saved bounds.
 func (m *Manager) SetMiniMode(mini bool) bool {
 	if mini {
+		if !m.IsMiniMode() {
+			m.CaptureLiveWindowBounds()
+		}
+	} else {
+		// Preserve current mini-widget position before returning to normal view
 		m.CaptureLiveWindowBounds()
 	}
+
 	m.mu.Lock()
 	m.miniMode = mini
+	miniHasPos := m.miniHasPos
+	miniX := m.miniX
+	miniY := m.miniY
 	bounds := m.bounds
 	topmost := m.alwaysOnTop
 	m.mu.Unlock()
 
-	hwlist := FindAllTraffCountWindows(false)
+	hwlist := FindAllTraffCountWindows(true)
+	applied := false
 	for _, hwnd := range hwlist {
+		iconic, _, _ := procIsIconic.Call(hwnd)
+		if iconic != 0 {
+			continue
+		}
 		if mini {
 			zoomed, _, _ := procIsZoomed.Call(hwnd)
 			if zoomed != 0 {
 				procShowWindow.Call(hwnd, SW_RESTORE)
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(40 * time.Millisecond)
 			}
-			var r winRect
-			procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
-			targetX := int(r.Left)
-			targetY := int(r.Top)
-			if targetX < 0 || targetY < 0 {
-				targetX = 80
-				targetY = 80
+			targetX, targetY := miniX, miniY
+			if !miniHasPos {
+				var r winRect
+				procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
+				targetX = int(r.Left)
+				targetY = int(r.Top)
+				if targetX < 0 || targetY < 0 {
+					targetX = 80
+					targetY = 80
+				}
+				m.mu.Lock()
+				m.miniX = targetX
+				m.miniY = targetY
+				m.miniHasPos = true
+				m.mu.Unlock()
+				miniX, miniY, miniHasPos = targetX, targetY, true
 			}
 			procSetWindowPos.Call(
 				hwnd,
 				HWND_TOPMOST,
 				uintptr(int32(targetX)),
 				uintptr(int32(targetY)),
-				uintptr(380),
-				uintptr(230),
-				SWP_SHOWWINDOW|SWP_FRAMECHANGED,
+				uintptr(miniWindowWidth),
+				uintptr(miniWindowHeight),
+				SWP_FRAMECHANGED|SWP_NOACTIVATE,
 			)
+			applied = true
 		} else {
 			if bounds.Width < 450 {
 				bounds.Width = 1180
@@ -197,17 +265,19 @@ func (m *Manager) SetMiniMode(mini bool) bool {
 			if bounds.Height < 320 {
 				bounds.Height = 780
 			}
-			if bounds.X < 0 {
+			if !bounds.HasValue || bounds.X < -10000 {
 				bounds.X = 120
 			}
-			if bounds.Y < 0 {
+			if !bounds.HasValue || bounds.Y < -10000 {
 				bounds.Y = 80
 			}
+			bounds.HasValue = true
 			applyWindowBounds(hwnd, bounds)
 			applyTopmost(hwnd, topmost)
+			applied = true
 		}
 	}
-	return len(hwlist) > 0
+	return applied
 }
 
 // IsAlwaysOnTop returns the current "Stay on Top" setting.
@@ -227,20 +297,80 @@ func (m *Manager) SetAlwaysOnTop(topmost bool) bool {
 	return ApplyTopmostToAllWindows(effectiveTop)
 }
 
-// InterceptMinimizeToTray checks if any TraffCount window has been minimized (IsIconic)
-// and hides it (SW_RESTORE + SW_HIDE) so it goes cleanly to the System Tray icon without destroying window state.
-func (m *Manager) InterceptMinimizeToTray() bool {
-	hwlist := FindAllTraffCountWindows(true)
-	hiddenAny := false
-	for _, hwnd := range hwlist {
-		iconic, _, _ := procIsIconic.Call(hwnd)
-		if iconic != 0 {
-			procShowWindow.Call(hwnd, SW_RESTORE)
-			procShowWindow.Call(hwnd, SW_HIDE)
-			hiddenAny = true
+// planMinimizeHides tracks when each visible window entered iconic (minimized) state and returns
+// those that have finished the DWM minimize animation delay so they can be cleanly hidden with SW_HIDE.
+func (m *Manager) planMinimizeHides(visibleIconic map[uintptr]bool, now time.Time) []uintptr {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.iconicSince == nil {
+		m.iconicSince = make(map[uintptr]time.Time)
+	}
+	for hwnd := range m.iconicSince {
+		if !visibleIconic[hwnd] {
+			delete(m.iconicSince, hwnd)
 		}
 	}
-	return hiddenAny
+	var toHide []uintptr
+	for hwnd, isIconic := range visibleIconic {
+		if !isIconic {
+			delete(m.iconicSince, hwnd)
+			continue
+		}
+		since, exists := m.iconicSince[hwnd]
+		if !exists {
+			m.iconicSince[hwnd] = now
+			continue
+		}
+		if now.Sub(since) >= minimizeHideDelay {
+			toHide = append(toHide, hwnd)
+			delete(m.iconicSince, hwnd)
+		}
+	}
+	return toHide
+}
+
+// InterceptMinimizeToTray waits for the native DWM minimize animation to complete on newly minimized
+// TraffCount windows, then hides them (SW_HIDE only, without a flashing SW_RESTORE) to the System Tray.
+func (m *Manager) InterceptMinimizeToTray() bool {
+	hwlist := FindAllTraffCountWindows(true)
+	if len(hwlist) == 0 {
+		m.planMinimizeHides(nil, time.Now())
+		return false
+	}
+
+	visibleIconic := make(map[uintptr]bool, len(hwlist))
+	for _, hwnd := range hwlist {
+		iconic, _, _ := procIsIconic.Call(hwnd)
+		visibleIconic[hwnd] = iconic != 0
+	}
+
+	toHide := m.planMinimizeHides(visibleIconic, time.Now())
+	if len(toHide) == 0 {
+		return false
+	}
+
+	for _, hwnd := range toHide {
+		// Record last restored mini-widget position before hiding while minimized.
+		if m.IsMiniMode() {
+			var wp windowPlacement
+			wp.Length = uint32(unsafe.Sizeof(wp))
+			if got, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp))); got != 0 {
+				w := int(wp.RcNormalPosition.Right - wp.RcNormalPosition.Left)
+				h := int(wp.RcNormalPosition.Bottom - wp.RcNormalPosition.Top)
+				if w > 0 && w <= 440 && h > 0 && h <= 280 && wp.RcNormalPosition.Left > -3000 && wp.RcNormalPosition.Top > -3000 {
+					m.mu.Lock()
+					m.miniX = int(wp.RcNormalPosition.Left)
+					m.miniY = int(wp.RcNormalPosition.Top)
+					m.miniHasPos = true
+					m.mu.Unlock()
+				}
+			}
+		}
+		// Hide without calling SW_RESTORE so DWM never snaps the window back mid-minimize.
+		// Preserving WS_MINIMIZE allows SetWindowPlacement(SW_RESTORE) to animate smoothly on reopen.
+		procShowWindow.Call(hwnd, SW_HIDE)
+	}
+	return true
 }
 
 // EnforceAlwaysOnTop checks open TraffCount windows and ensures their WS_EX_TOPMOST style matches topmost.
@@ -253,6 +383,10 @@ func (m *Manager) EnforceAlwaysOnTop(topmost bool) {
 
 	hwlist := FindAllTraffCountWindows(true)
 	for _, hwnd := range hwlist {
+		iconic, _, _ := procIsIconic.Call(hwnd)
+		if iconic != 0 {
+			continue
+		}
 		if inMini {
 			var r winRect
 			ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r)))
@@ -274,11 +408,15 @@ func (m *Manager) OpenDashboard() error {
 	m.mu.Lock()
 	topmost := m.alwaysOnTop
 	inMini := m.miniMode
+	miniHasPos := m.miniHasPos
+	miniX := m.miniX
+	miniY := m.miniY
 	url := m.url
 	bounds := m.bounds
 	if hwnd := FindAnyTraffCountWindow(); hwnd != 0 {
+		delete(m.iconicSince, hwnd)
 		m.mu.Unlock()
-		focusExistingWindow(hwnd, topmost, bounds, inMini)
+		m.focusExistingWindow(hwnd, topmost, bounds, inMini, miniHasPos, miniX, miniY)
 		time.Sleep(60 * time.Millisecond)
 		if vis, _, _ := procIsWindowVisible.Call(hwnd); vis != 0 {
 			return nil
@@ -300,13 +438,28 @@ func (m *Manager) OpenDashboard() error {
 		profileDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "TraffCount", "WebViewProfile")
 		_ = os.MkdirAll(profileDir, 0755)
 
-		w := bounds.Width
-		h := bounds.Height
-		if w < 450 {
-			w = 1180
-		}
-		if h < 320 {
-			h = 780
+		var w, h, x, y int
+		var hasPos bool
+		if inMini {
+			w = miniWindowWidth
+			h = miniWindowHeight
+			if miniHasPos {
+				x, y, hasPos = miniX, miniY, true
+			} else if bounds.HasValue && bounds.X >= 0 && bounds.Y >= 0 {
+				x, y, hasPos = bounds.X, bounds.Y, true
+			}
+		} else {
+			w = bounds.Width
+			h = bounds.Height
+			if w < 450 {
+				w = 1180
+			}
+			if h < 320 {
+				h = 780
+			}
+			if bounds.HasValue {
+				x, y, hasPos = bounds.X, bounds.Y, true
+			}
 		}
 
 		args := []string{
@@ -316,8 +469,8 @@ func (m *Manager) OpenDashboard() error {
 			"--no-first-run",
 			"--disable-features=Translate",
 		}
-		if bounds.HasValue {
-			args = append(args, fmt.Sprintf("--window-position=%d,%d", bounds.X, bounds.Y))
+		if hasPos {
+			args = append(args, fmt.Sprintf("--window-position=%d,%d", x, y))
 		}
 
 		cmd := exec.Command(edgePath, args...)
@@ -337,7 +490,7 @@ func (m *Manager) OpenDashboard() error {
 					}
 					if hwnd := FindTraffCountWindow(); hwnd != 0 {
 						if m.IsMiniMode() {
-							m.SetMiniMode(true)
+							m.applyMiniToWindow(hwnd)
 						} else {
 							b := m.GetSavedBounds()
 							if b.HasValue {
@@ -362,8 +515,46 @@ func (m *Manager) OpenDashboard() error {
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }
 
+func (m *Manager) applyMiniToWindow(hwnd uintptr) {
+	m.mu.Lock()
+	miniHasPos := m.miniHasPos
+	miniX := m.miniX
+	miniY := m.miniY
+	m.mu.Unlock()
+
+	flags := uintptr(SWP_FRAMECHANGED | SWP_NOACTIVATE)
+	if !miniHasPos {
+		flags |= SWP_NOMOVE
+	}
+	procSetWindowPos.Call(
+		hwnd,
+		HWND_TOPMOST,
+		uintptr(int32(miniX)),
+		uintptr(int32(miniY)),
+		uintptr(miniWindowWidth),
+		uintptr(miniWindowHeight),
+		flags,
+	)
+}
+
 func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
 	if b.Width >= 450 && b.Height >= 320 {
+		var wp windowPlacement
+		wp.Length = uint32(unsafe.Sizeof(wp))
+		if b.Maximized {
+			if got, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp))); got != 0 {
+				wp.RcNormalPosition = winRect{
+					Left:   int32(b.X),
+					Top:    int32(b.Y),
+					Right:  int32(b.X + b.Width),
+					Bottom: int32(b.Y + b.Height),
+				}
+				wp.Flags |= WPF_RESTORETOMAXIMIZED
+				wp.ShowCmd = SW_SHOWMAXIMIZED
+				procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+				return
+			}
+		}
 		procSetWindowPos.Call(
 			hwnd,
 			0,
@@ -375,33 +566,99 @@ func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {
 		)
 	}
 	if b.Maximized {
-		procShowWindow.Call(hwnd, SW_MAXIMIZE)
+		procShowWindow.Call(hwnd, SW_SHOWMAXIMIZED)
 	}
 }
 
-func focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds, inMini bool) {
+func ensureTransitionsEnabled(hwnd uintptr) {
+	var disable int32 // FALSE = allow DWM open/minimize/restore transitions
+	procDwmSetWindowAttribute.Call(
+		hwnd,
+		DWMWA_TRANSITIONS_FORCEDISABLED,
+		uintptr(unsafe.Pointer(&disable)),
+		unsafe.Sizeof(disable),
+	)
+}
+
+func (m *Manager) focusExistingWindow(hwnd uintptr, topmost bool, bounds storage.WindowBounds, inMini bool, miniHasPos bool, miniX int, miniY int) {
 	vis, _, _ := procIsWindowVisible.Call(hwnd)
 	iconic, _, _ := procIsIconic.Call(hwnd)
-	if vis == 0 {
-		procShowWindow.Call(hwnd, SW_SHOW)
+	effectiveTop := topmost || inMini
+
+	// Already visible and un-minimized: bring to front cleanly without re-running show animations.
+	if vis != 0 && iconic == 0 {
+		if isWindowTopmost(hwnd) != effectiveTop {
+			applyTopmost(hwnd, effectiveTop)
+		}
+		if inMini {
+			var r winRect
+			if ret, _, _ := procGetWindowRect.Call(hwnd, uintptr(unsafe.Pointer(&r))); ret != 0 {
+				if (r.Right-r.Left) > 420 || (r.Bottom-r.Top) > 280 {
+					m.applyMiniToWindow(hwnd)
+				}
+			}
+		}
+		procSetForeground.Call(hwnd)
+		return
 	}
-	if iconic != 0 {
+
+	// Ensure DWM transitions are enabled and apply Z-order while still hidden so restore animates in a single step.
+	ensureTransitionsEnabled(hwnd)
+	if vis == 0 {
+		applyTopmost(hwnd, effectiveTop)
+	}
+
+	var wp windowPlacement
+	wp.Length = uint32(unsafe.Sizeof(wp))
+	if got, _, _ := procGetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp))); got != 0 {
+		if inMini {
+			mx, my := miniX, miniY
+			if !miniHasPos {
+				rw := int(wp.RcNormalPosition.Right - wp.RcNormalPosition.Left)
+				rh := int(wp.RcNormalPosition.Bottom - wp.RcNormalPosition.Top)
+				if rw > 0 && rw <= 440 && rh > 0 && rh <= 280 && wp.RcNormalPosition.Left > -3000 && wp.RcNormalPosition.Top > -3000 {
+					mx = int(wp.RcNormalPosition.Left)
+					my = int(wp.RcNormalPosition.Top)
+				} else {
+					mx, my = 80, 80
+				}
+			}
+			wp.RcNormalPosition = winRect{
+				Left:   int32(mx),
+				Top:    int32(my),
+				Right:  int32(mx + miniWindowWidth),
+				Bottom: int32(my + miniWindowHeight),
+			}
+			wp.Flags &^= WPF_RESTORETOMAXIMIZED
+			wp.ShowCmd = SW_RESTORE
+		} else {
+			if bounds.HasValue && bounds.Width >= 450 && bounds.Height >= 320 {
+				wp.RcNormalPosition = winRect{
+					Left:   int32(bounds.X),
+					Top:    int32(bounds.Y),
+					Right:  int32(bounds.X + bounds.Width),
+					Bottom: int32(bounds.Y + bounds.Height),
+				}
+			}
+			if bounds.HasValue && bounds.Maximized {
+				wp.Flags |= WPF_RESTORETOMAXIMIZED
+				wp.ShowCmd = SW_SHOWMAXIMIZED
+			} else {
+				wp.Flags &^= WPF_RESTORETOMAXIMIZED
+				if iconic != 0 {
+					wp.ShowCmd = SW_RESTORE
+				} else {
+					wp.ShowCmd = SW_SHOWNORMAL
+				}
+			}
+		}
+		procSetWindowPlacement.Call(hwnd, uintptr(unsafe.Pointer(&wp)))
+	} else {
 		procShowWindow.Call(hwnd, SW_RESTORE)
 	}
-	if inMini {
-		procSetWindowPos.Call(
-			hwnd,
-			HWND_TOPMOST,
-			0, 0,
-			uintptr(380),
-			uintptr(230),
-			SWP_NOMOVE|SWP_SHOWWINDOW|SWP_FRAMECHANGED,
-		)
-	} else if bounds.HasValue {
-		applyWindowBounds(hwnd, bounds)
-		applyTopmost(hwnd, topmost)
-	} else {
-		applyTopmost(hwnd, topmost)
+
+	if isWindowTopmost(hwnd) != effectiveTop {
+		applyTopmost(hwnd, effectiveTop)
 	}
 	procSetForeground.Call(hwnd)
 }

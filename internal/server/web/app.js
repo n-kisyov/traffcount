@@ -20,6 +20,7 @@
       newAppAlertEnabled: false,
     },
     miniMode: false,
+    wasMaximizedBeforeMini: false,
     dataSource: "app",
     latestRealtime: null,
     historyFilter: {
@@ -399,10 +400,29 @@
     });
   }
 
+  function applyMiniModeState(isMini) {
+    state.miniMode = !!isMini;
+    document.body.classList.toggle("mini-mode", state.miniMode);
+    if (btnMiniWidget) {
+      btnMiniWidget.classList.toggle("pinned", state.miniMode);
+    }
+    if (miniWidgetLabel) {
+      miniWidgetLabel.textContent = state.miniMode ? "Full View" : "Mini Widget";
+    }
+    if (state.miniMode && state.activeTab !== "realtime") {
+      // Switch to realtime tab for the mini widget
+      const rtBtn = document.querySelector('.nav-item[data-tab="realtime"]');
+      if (rtBtn) rtBtn.click();
+    }
+  }
+
   // Mini-Widget Floating Overlay Mode Toggle
   if (btnMiniWidget) {
     btnMiniWidget.addEventListener("click", async () => {
       if (!state.miniMode && window.outerWidth >= 450 && window.outerHeight >= 320) {
+        state.wasMaximizedBeforeMini =
+          window.outerWidth >= screen.availWidth - 4 &&
+          window.outerHeight >= screen.availHeight - 4;
         state.normalBounds = {
           x: Math.max(0, Math.round(window.screenX)),
           y: Math.max(0, Math.round(window.screenY)),
@@ -410,17 +430,7 @@
           height: Math.round(window.outerHeight),
         };
       }
-      state.miniMode = !state.miniMode;
-      document.body.classList.toggle("mini-mode", state.miniMode);
-      btnMiniWidget.classList.toggle("pinned", state.miniMode);
-      if (miniWidgetLabel) {
-        miniWidgetLabel.textContent = state.miniMode ? "Full View" : "Mini Widget";
-      }
-      if (state.miniMode && state.activeTab !== "realtime") {
-        // Switch to realtime tab for the mini widget
-        const rtBtn = document.querySelector('.nav-item[data-tab="realtime"]');
-        if (rtBtn) rtBtn.click();
-      }
+      applyMiniModeState(!state.miniMode);
       try {
         await fetch("/api/window/mini", {
           method: "POST",
@@ -430,8 +440,14 @@
       } catch (_) {}
       try {
         if (state.miniMode) {
-          window.resizeTo(380, 230);
-        } else if (state.normalBounds) {
+          if (window.outerWidth > 420 || window.outerHeight > 280) {
+            window.resizeTo(380, 230);
+          }
+        } else if (
+          state.normalBounds &&
+          !state.wasMaximizedBeforeMini &&
+          (window.outerWidth < 450 || window.outerHeight < 320)
+        ) {
           window.resizeTo(state.normalBounds.width, state.normalBounds.height);
           window.moveTo(state.normalBounds.x, state.normalBounds.y);
         }
@@ -1698,11 +1714,31 @@
   inputStartDate.value = twoWeeksAgoStr;
   inputEndDate.value = todayStr;
 
+  async function syncMiniModeOnBoot() {
+    try {
+      const res = await fetch("/api/window/mini");
+      if (res.ok) {
+        const st = await res.json();
+        if (st && typeof st.mini === "boolean") {
+          applyMiniModeState(st.mini);
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Apply mini-mode immediately at boot when reopened at widget dimensions so full UI doesn't flash.
+  if (window.outerWidth <= 420 && window.outerHeight <= 280) {
+    applyMiniModeState(true);
+  }
+
   // Boot
-  loadSettings().then(() => {
+  Promise.all([loadSettings(), syncMiniModeOnBoot()]).then(() => {
     connectWebSocket();
     fetchServiceStatus();
     fetchConnections();
+    if (state.miniMode) {
+      setTimeout(() => renderRealtimeView(), 80);
+    }
     // Periodically sync settings in case Stay on Top or Start on Boot was toggled from the System Tray menu
     setInterval(async () => {
       try {

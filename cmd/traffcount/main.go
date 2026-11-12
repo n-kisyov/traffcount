@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -87,6 +88,9 @@ func main() {
 	var startMinimized bool
 	var initialBounds storage.WindowBounds
 	if alreadyRunning {
+		// Always start the app in normal mode on cold start even if the background service
+		// still remembers miniMode=true from an earlier desktop session.
+		resetMiniModeOnServer(dashboardURL)
 		initialBounds = fetchBoundsFromServer(dashboardURL)
 		if cfg, ok := fetchSettingsFromServer(dashboardURL); ok {
 			initialTopmost = cfg.AlwaysOnTop
@@ -280,6 +284,14 @@ func fetchBoundsFromServer(baseURL string) storage.WindowBounds {
 		return b
 	}
 	return storage.DefaultWindowBounds()
+}
+
+func resetMiniModeOnServer(baseURL string) {
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+	resp, err := client.Post(baseURL+"/api/window/mini", "application/json", strings.NewReader(`{"mini":false}`))
+	if err == nil {
+		resp.Body.Close()
+	}
 }
 
 func fetchSettingsFromServer(baseURL string) (storage.Settings, bool) {

@@ -622,6 +622,9 @@ func (c *Controller) windowMinimizeWatcher(ctx context.Context) {
 			ticks++
 			if ticks >= 5 && c.opts.WinMgr != nil {
 				ticks = 0
+				if c.opts.WinMgr.IsMiniMode() {
+					c.opts.WinMgr.CaptureLiveWindowBounds()
+				}
 				resp, err := client.Get(c.opts.DashboardURL + "/api/window/mini")
 				if err == nil {
 					if resp.StatusCode == http.StatusOK {
