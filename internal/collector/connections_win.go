@@ -109,15 +109,19 @@ var (
 	blockedAppsMu sync.RWMutex
 	blockedApps   = make(map[string]bool)
 
-	iphlpapi                     = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetPerTcpConnectionEStat = iphlpapi.NewProc("GetPerTcpConnectionEStats")
-	procSetPerTcpConnectionEStat = iphlpapi.NewProc("SetPerTcpConnectionEStats")
-	procSetTcpEntry              = iphlpapi.NewProc("SetTcpEntry")
+	iphlpapi                      = windows.NewLazySystemDLL("iphlpapi.dll")
+	procGetPerTcpConnectionEStat  = iphlpapi.NewProc("GetPerTcpConnectionEStats")
+	procSetPerTcpConnectionEStat  = iphlpapi.NewProc("SetPerTcpConnectionEStats")
+	procGetPerTcp6ConnectionEStat = iphlpapi.NewProc("GetPerTcp6ConnectionEStats")
+	procSetPerTcp6ConnectionEStat = iphlpapi.NewProc("SetPerTcp6ConnectionEStats")
+	procSetTcpEntry               = iphlpapi.NewProc("SetTcpEntry")
 )
 
 const (
-	tcpConnectionEstatsData = 1
-	tcpConnectionEstatsPath = 2
+	tcpConnectionEstatsSynOpts = 0
+	tcpConnectionEstatsData    = 1
+	tcpConnectionEstatsSndCong = 2
+	tcpConnectionEstatsPath    = 3
 )
 
 type mibTcpRow struct {
@@ -128,6 +132,17 @@ type mibTcpRow struct {
 	RemotePort uint32
 }
 
+type mibTcp6Row struct {
+	State         uint32
+	LocalAddr     [16]byte
+	LocalScopeId  uint32
+	LocalPort     uint32
+	RemoteAddr    [16]byte
+	RemoteScopeId uint32
+	RemotePort    uint32
+}
+
+// Mirrors TCP_ESTATS_DATA_ROD_v0 in <tcpestats.h> (96 bytes on x64).
 type tcpEstatsDataRodv0 struct {
 	DataBytesOut      uint64
 	DataSegsOut       uint64
@@ -135,48 +150,62 @@ type tcpEstatsDataRodv0 struct {
 	DataSegsIn        uint64
 	SegsOut           uint64
 	SegsIn            uint64
-	ThruBytesAcked    uint32
-	ThruBytesReceived uint32
+	SoftErrors        uint32
+	SoftErrorReason   uint32
+	SndUna            uint32
+	SndNxt            uint32
+	SndMax            uint32
+	ThruBytesAcked    uint64
+	RcvNxt            uint32
+	ThruBytesReceived uint64
 }
 
 type tcpEstatsDataRwv0 struct {
 	EnableCollection uint8
 }
 
+// Mirrors TCP_ESTATS_PATH_ROD_v0 in <tcpestats.h> (40 ULONG fields = 160 bytes).
 type tcpEstatsPathRodv0 struct {
-	FastRetran int32
-	Timeouts   uint32
-	SubsequentTimeouts uint32
-	CurTimeoutCount    uint32
-	AbruptTimeouts     uint32
-	PktsRetrans        uint32
-	BytesRetrans       uint32
-	DupAcksIn          uint32
-	SacksRcvd          uint32
-	SackBlocksRcvd     uint32
-	CongSignals        uint32
-	PreCongSumCwnd     uint32
-	PreCongSumRtt      uint32
-	PostCongSumRtt     uint32
-	PostCongCountRtt   uint32
-	EcnSignals         uint32
-	EceRcvd            uint32
-	SendStall          uint32
-	QuenchRcvd         uint32
-	RetranThresh       uint32
-	SndDupAckEpisodes  uint32
-	SumBytesReordered  uint32
-	NonRecovDa         uint32
-	NonRecovDaEpisodes uint32
-	AckAfterFr         uint32
-	DsackDups          uint32
-	SampleRtt          uint32
-	SmoothedRtt        uint32
-	RttVar             uint32
-	MaxRtt             uint32
-	MinRtt             uint32
-	SumRtt             uint32
-	CountRtt           uint32
+	FastRetran            int32
+	Timeouts              uint32
+	SubsequentTimeouts    uint32
+	CurTimeoutCount       uint32
+	AbruptTimeouts        uint32
+	PktsRetrans           uint32
+	BytesRetrans          uint32
+	DupAcksIn             uint32
+	SacksRcvd             uint32
+	SackBlocksRcvd        uint32
+	CongSignals           uint32
+	PreCongSumCwnd        uint32
+	PreCongSumRtt         uint32
+	PostCongSumRtt        uint32
+	PostCongCountRtt      uint32
+	EcnSignals            uint32
+	EceRcvd               uint32
+	SendStall             uint32
+	QuenchRcvd            uint32
+	RetranThresh          uint32
+	SndDupAckEpisodes     uint32
+	SumBytesReordered     uint32
+	NonRecovDa            uint32
+	NonRecovDaEpisodes    uint32
+	AckAfterFr            uint32
+	DsackDups             uint32
+	SampleRtt             uint32
+	SmoothedRtt           uint32
+	RttVar                uint32
+	MaxRtt                uint32
+	MinRtt                uint32
+	SumRtt                uint32
+	CountRtt              uint32
+	CurRto                uint32
+	MaxRto                uint32
+	MinRto                uint32
+	CurMss                uint32
+	MaxMss                uint32
+	MinMss                uint32
+	SpuriousRtoDetections uint32
 }
 
 type tcpEstatsPathRwv0 struct {
@@ -208,9 +237,7 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 
 	for _, st := range stats {
 		localIP := st.Laddr.IP
-		if filterIP != "" && localIP != filterIP && localIP != "0.0.0.0" && localIP != "::" && localIP != "*" {
-			continue
-		}
+		matchesFilter := filterIP == "" || localIP == filterIP || localIP == "0.0.0.0" || localIP == "::" || localIP == "*"
 
 		proto := "TCP"
 		isUDP := st.Type == windows.SOCK_DGRAM
@@ -221,25 +248,31 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 			} else {
 				proto = "UDP"
 			}
-			snap.TotalUDP++
+			if matchesFilter {
+				snap.TotalUDP++
+			}
 		} else {
 			if isIPv6 {
 				proto = "TCP6"
 			}
-			snap.TotalTCP++
+			if matchesFilter {
+				snap.TotalTCP++
+			}
 		}
 
 		stateStr := st.Status
 		if isUDP && stateStr == "" {
 			stateStr = "ACTIVE"
 		}
-		switch stateStr {
-		case "ESTABLISHED":
-			snap.EstablishedCount++
-		case "LISTEN":
-			snap.ListenCount++
-		case "TIME_WAIT", "CLOSE_WAIT":
-			snap.TimeWaitCount++
+		if matchesFilter {
+			switch stateStr {
+			case "ESTABLISHED":
+				snap.EstablishedCount++
+			case "LISTEN":
+				snap.ListenCount++
+			case "TIME_WAIT", "CLOSE_WAIT":
+				snap.TimeWaitCount++
+			}
 		}
 
 		procName, exePath := resolveProcessIdentity(st.Pid, now)
@@ -247,36 +280,44 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 		localFormatted := formatEndpoint(st.Laddr.IP, st.Laddr.Port)
 		remoteFormatted := "—"
 		var remoteHost, countryCode, geoLabel string
-		if st.Raddr.IP != "" && st.Raddr.Port != 0 {
+		if matchesFilter && st.Raddr.IP != "" && st.Raddr.Port != 0 {
 			remoteFormatted = formatEndpoint(st.Raddr.IP, st.Raddr.Port)
 			remoteHost, countryCode, geoLabel = lookupRemoteHostAndGeoAsync(st.Raddr.IP, now)
+		} else if st.Raddr.IP != "" && st.Raddr.Port != 0 {
+			remoteFormatted = formatEndpoint(st.Raddr.IP, st.Raddr.Port)
 		}
 
 		var rxBytes, txBytes uint64
 		var rttMs uint32
-		if !isUDP && !isIPv6 && stateStr == "ESTABLISHED" {
-			rxBytes, txBytes, rttMs = queryTCPEStatsV4(st.Laddr.IP, st.Laddr.Port, st.Raddr.IP, st.Raddr.Port)
+		if !isUDP && stateStr == "ESTABLISHED" {
+			if isIPv6 {
+				rxBytes, txBytes, rttMs = queryTCPEStatsV6(st.Laddr.IP, st.Laddr.Port, st.Raddr.IP, st.Raddr.Port)
+			} else {
+				rxBytes, txBytes, rttMs = queryTCPEStatsV4(st.Laddr.IP, st.Laddr.Port, st.Raddr.IP, st.Raddr.Port)
+			}
 		}
 
-		snap.Connections = append(snap.Connections, ConnectionInfo{
-			Protocol:    proto,
-			LocalAddr:   localFormatted,
-			LocalIP:     st.Laddr.IP,
-			LocalPort:   st.Laddr.Port,
-			RemoteAddr:  remoteFormatted,
-			RemoteIP:    st.Raddr.IP,
-			RemoteHost:  remoteHost,
-			CountryCode: countryCode,
-			GeoLabel:    geoLabel,
-			RemotePort:  st.Raddr.Port,
-			State:       stateStr,
-			PID:         st.Pid,
-			ProcessName: procName,
-			ExePath:     exePath,
-			RttMs:       rttMs,
-			RxBytes:     rxBytes,
-			TxBytes:     txBytes,
-		})
+		if matchesFilter {
+			snap.Connections = append(snap.Connections, ConnectionInfo{
+				Protocol:    proto,
+				LocalAddr:   localFormatted,
+				LocalIP:     st.Laddr.IP,
+				LocalPort:   st.Laddr.Port,
+				RemoteAddr:  remoteFormatted,
+				RemoteIP:    st.Raddr.IP,
+				RemoteHost:  remoteHost,
+				CountryCode: countryCode,
+				GeoLabel:    geoLabel,
+				RemotePort:  st.Raddr.Port,
+				State:       stateStr,
+				PID:         st.Pid,
+				ProcessName: procName,
+				ExePath:     exePath,
+				RttMs:       rttMs,
+				RxBytes:     rxBytes,
+				TxBytes:     txBytes,
+			})
+		}
 
 		key := fmt.Sprintf("%d_%s", st.Pid, procName)
 		ps, ok := procMap[key]
@@ -294,17 +335,21 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 			curSocketRx[key] = make(map[string]uint64)
 			curSocketTx[key] = make(map[string]uint64)
 		}
-		ps.Total++
-		switch stateStr {
-		case "ESTABLISHED":
-			ps.Established++
-		case "LISTEN":
-			ps.Listening++
-		default:
-			ps.Other++
+		if matchesFilter {
+			ps.Total++
+			switch stateStr {
+			case "ESTABLISHED":
+				ps.Established++
+			case "LISTEN":
+				ps.Listening++
+			default:
+				ps.Other++
+			}
 		}
 
-		if rxBytes > 0 || txBytes > 0 {
+		// Always record all non-loopback established TCP socket counters in curSocketRx/Tx
+		// regardless of filterIP so delta tracking across multi-NIC/VPN configurations never resets.
+		if (rxBytes > 0 || txBytes > 0) && !isLoopbackEndpoint(st.Laddr.IP) && !isLoopbackEndpoint(st.Raddr.IP) {
 			sockKey := localFormatted + "->" + remoteFormatted
 			curSocketRx[key][sockKey] = rxBytes
 			curSocketTx[key][sockKey] = txBytes
@@ -316,10 +361,18 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 	for key, ps := range procMap {
 		tr, exists := procTrack[key]
 		if !exists {
+			initRx := make(map[string]uint64, len(curSocketRx[key]))
+			for k, v := range curSocketRx[key] {
+				initRx[k] = v
+			}
+			initTx := make(map[string]uint64, len(curSocketTx[key]))
+			for k, v := range curSocketTx[key] {
+				initTx[k] = v
+			}
 			tr = &procTrafficTracker{
 				exePath:      ps.ExePath,
-				lastSocketRx: make(map[string]uint64),
-				lastSocketTx: make(map[string]uint64),
+				lastSocketRx: initRx,
+				lastSocketTx: initTx,
 				lastSample:   now,
 			}
 			procTrack[key] = tr
@@ -329,6 +382,7 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 					pendingProcDeltas[ps.ProcessName] = &storage.ProcessTrafficDelta{
 						ProcessName: ps.ProcessName,
 						ExePath:     ps.ExePath,
+						Timestamp:   now,
 					}
 				}
 			}
@@ -362,11 +416,13 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 					pd = &storage.ProcessTrafficDelta{
 						ProcessName: ps.ProcessName,
 						ExePath:     ps.ExePath,
+						Timestamp:   now,
 					}
 					pendingProcDeltas[ps.ProcessName] = pd
 				}
 				pd.RxBytes += deltaRx
 				pd.TxBytes += deltaTx
+				pd.Timestamp = now
 				if pd.ExePath == "" && ps.ExePath != "" {
 					pd.ExePath = ps.ExePath
 				}
@@ -411,7 +467,9 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 	})
 
 	for _, ps := range procMap {
-		snap.TopProcesses = append(snap.TopProcesses, *ps)
+		if ps.Total > 0 {
+			snap.TopProcesses = append(snap.TopProcesses, *ps)
+		}
 	}
 	sort.Slice(snap.TopProcesses, func(i, j int) bool {
 		rateI := snap.TopProcesses[i].RxBps + snap.TopProcesses[i].TxBps
@@ -552,45 +610,103 @@ func queryTCPEStatsV4(localIP string, localPort uint32, remoteIP string, remoteP
 		RemotePort: htons32(uint16(remotePort)),
 	}
 
-	// Read Data EStats
+	return queryEstats(uintptr(unsafe.Pointer(&row)), procGetPerTcpConnectionEStat, procSetPerTcpConnectionEStat)
+}
+
+func parseIPv6NoZone(s string) net.IP {
+	if idx := strings.IndexByte(s, '%'); idx >= 0 {
+		s = s[:idx]
+	}
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil
+	}
+	return ip.To16()
+}
+
+func isLoopbackEndpoint(ipStr string) bool {
+	if ipStr == "" {
+		return false
+	}
+	if idx := strings.IndexByte(ipStr, '%'); idx >= 0 {
+		ipStr = ipStr[:idx]
+	}
+	ip := net.ParseIP(ipStr)
+	return ip != nil && ip.IsLoopback()
+}
+
+func queryTCPEStatsV6(localIP string, localPort uint32, remoteIP string, remotePort uint32) (rxBytes uint64, txBytes uint64, rttMs uint32) {
+	lip := parseIPv6NoZone(localIP)
+	rip := parseIPv6NoZone(remoteIP)
+	if lip == nil || rip == nil {
+		return 0, 0, 0
+	}
+
+	var row mibTcp6Row
+	row.State = 5 // MIB_TCP_STATE_ESTAB
+	copy(row.LocalAddr[:], lip)
+	row.LocalPort = htons32(uint16(localPort))
+	copy(row.RemoteAddr[:], rip)
+	row.RemotePort = htons32(uint16(remotePort))
+
+	return queryEstats(uintptr(unsafe.Pointer(&row)), procGetPerTcp6ConnectionEStat, procSetPerTcp6ConnectionEStat)
+}
+
+func queryEstats(rowPtr uintptr, getProc, setProc *windows.LazyProc) (rxBytes uint64, txBytes uint64, rttMs uint32) {
+	// Read Data EStats (RwVersion = 0, RodVersion = 0)
 	var dataRw tcpEstatsDataRwv0
 	var dataRod tcpEstatsDataRodv0
-	ret, _, _ := procGetPerTcpConnectionEStat.Call(
-		uintptr(unsafe.Pointer(&row)),
+	ret, _, _ := getProc.Call(
+		rowPtr,
 		tcpConnectionEstatsData,
-		uintptr(unsafe.Pointer(&dataRw)), 1, uintptr(unsafe.Sizeof(dataRw)),
+		uintptr(unsafe.Pointer(&dataRw)), 0, uintptr(unsafe.Sizeof(dataRw)),
 		0, 0, 0,
 		uintptr(unsafe.Pointer(&dataRod)), 0, uintptr(unsafe.Sizeof(dataRod)),
 	)
 	if ret == 0 {
 		if dataRw.EnableCollection == 0 {
 			dataRw.EnableCollection = 1
-			procSetPerTcpConnectionEStat.Call(
-				uintptr(unsafe.Pointer(&row)),
+			sRet, _, _ := setProc.Call(
+				rowPtr,
 				tcpConnectionEstatsData,
 				uintptr(unsafe.Pointer(&dataRw)), 0, uintptr(unsafe.Sizeof(dataRw)), 0,
 			)
+			if sRet == 0 {
+				// Re-read with a fresh Rw struct to confirm Windows populated stats
+				var checkRw tcpEstatsDataRwv0
+				retRetry, _, _ := getProc.Call(
+					rowPtr,
+					tcpConnectionEstatsData,
+					uintptr(unsafe.Pointer(&checkRw)), 0, uintptr(unsafe.Sizeof(checkRw)),
+					0, 0, 0,
+					uintptr(unsafe.Pointer(&dataRod)), 0, uintptr(unsafe.Sizeof(dataRod)),
+				)
+				if retRetry == 0 && checkRw.EnableCollection != 0 {
+					rxBytes = dataRod.DataBytesIn
+					txBytes = dataRod.DataBytesOut
+				}
+			}
 		} else {
 			rxBytes = dataRod.DataBytesIn
 			txBytes = dataRod.DataBytesOut
 		}
 	}
 
-	// Read Path EStats (Smoothed RTT)
+	// Read Path EStats (Smoothed RTT, RwVersion = 0, RodVersion = 0)
 	var pathRw tcpEstatsPathRwv0
 	var pathRod tcpEstatsPathRodv0
-	ret2, _, _ := procGetPerTcpConnectionEStat.Call(
-		uintptr(unsafe.Pointer(&row)),
+	ret2, _, _ := getProc.Call(
+		rowPtr,
 		tcpConnectionEstatsPath,
-		uintptr(unsafe.Pointer(&pathRw)), 1, uintptr(unsafe.Sizeof(pathRw)),
+		uintptr(unsafe.Pointer(&pathRw)), 0, uintptr(unsafe.Sizeof(pathRw)),
 		0, 0, 0,
 		uintptr(unsafe.Pointer(&pathRod)), 0, uintptr(unsafe.Sizeof(pathRod)),
 	)
 	if ret2 == 0 {
 		if pathRw.EnableCollection == 0 {
 			pathRw.EnableCollection = 1
-			procSetPerTcpConnectionEStat.Call(
-				uintptr(unsafe.Pointer(&row)),
+			setProc.Call(
+				rowPtr,
 				tcpConnectionEstatsPath,
 				uintptr(unsafe.Pointer(&pathRw)), 0, uintptr(unsafe.Sizeof(pathRw)), 0,
 			)

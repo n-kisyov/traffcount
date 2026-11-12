@@ -20,6 +20,7 @@
       newAppAlertEnabled: false,
     },
     miniMode: false,
+    dataSource: "app",
     latestRealtime: null,
     historyFilter: {
       period: "",
@@ -1307,7 +1308,11 @@
     if (historyProcTableBody) {
       const byProc = report.byProcess || [];
       if (byProc.length === 0) {
-        historyProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">No per-application traffic recorded for this period yet.</td></tr>`;
+        const msg =
+          state.dataSource === "app"
+            ? "No per-application traffic recorded for this period yet. Start TraffCountService (or run as Administrator) to allow Windows TCP EStats collection."
+            : "No per-application traffic recorded for this period yet — active TCP traffic will appear here automatically.";
+        historyProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">${msg}</td></tr>`;
       } else {
         historyProcTableBody.innerHTML = byProc
           .map((p) => {
@@ -1514,8 +1519,9 @@
   }
 
   function updateDataSourceBadge(source) {
+    state.dataSource = source === "service" ? "service" : "app";
     if (!dataSourceBadge) return;
-    const isSvc = source === "service";
+    const isSvc = state.dataSource === "service";
     dataSourceBadge.textContent = isSvc ? "Source: Service" : "Source: App";
     dataSourceBadge.classList.toggle("service", isSvc);
     dataSourceBadge.classList.toggle("app", !isSvc);

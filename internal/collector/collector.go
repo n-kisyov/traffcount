@@ -173,7 +173,7 @@ func (c *Collector) Run(ctx context.Context) {
 	pollTicker := time.NewTicker(1 * time.Second)
 	flushTicker := time.NewTicker(15 * time.Second)
 	diagTicker := time.NewTicker(3 * time.Second)
-	procTicker := time.NewTicker(4 * time.Second)
+	procTicker := time.NewTicker(2 * time.Second)
 	defer pollTicker.Stop()
 	defer flushTicker.Stop()
 	defer diagTicker.Stop()
