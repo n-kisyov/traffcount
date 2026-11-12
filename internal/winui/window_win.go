@@ -3,7 +3,9 @@
 package winui
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,20 +22,21 @@ import (
 const WindowTitlePrefix = "TraffCount — Network Monitor"
 
 var (
-	user32                  = windows.NewLazySystemDLL("user32.dll")
-	procEnumWindows         = user32.NewProc("EnumWindows")
-	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
-	procSetWindowPos        = user32.NewProc("SetWindowPos")
-	procGetWindowRect       = user32.NewProc("GetWindowRect")
-	procGetWindowPlacement  = user32.NewProc("GetWindowPlacement")
-	procSetWindowPlacement  = user32.NewProc("SetWindowPlacement")
-	procSetForeground       = user32.NewProc("SetForegroundWindow")
-	procShowWindow          = user32.NewProc("ShowWindow")
-	procPostMessageW        = user32.NewProc("PostMessageW")
-	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
-	procIsIconic            = user32.NewProc("IsIconic")
-	procIsZoomed            = user32.NewProc("IsZoomed")
-	procGetWindowLongW      = user32.NewProc("GetWindowLongW")
+	user32                   = windows.NewLazySystemDLL("user32.dll")
+	procEnumWindows          = user32.NewProc("EnumWindows")
+	procGetWindowTextW       = user32.NewProc("GetWindowTextW")
+	procSetWindowPos         = user32.NewProc("SetWindowPos")
+	procGetWindowRect        = user32.NewProc("GetWindowRect")
+	procGetWindowPlacement   = user32.NewProc("GetWindowPlacement")
+	procSetWindowPlacement   = user32.NewProc("SetWindowPlacement")
+	procSetForeground        = user32.NewProc("SetForegroundWindow")
+	procShowWindow           = user32.NewProc("ShowWindow")
+	procPostMessageW         = user32.NewProc("PostMessageW")
+	procIsWindowVisible      = user32.NewProc("IsWindowVisible")
+	procIsIconic             = user32.NewProc("IsIconic")
+	procIsZoomed             = user32.NewProc("IsZoomed")
+	procGetWindowLongW       = user32.NewProc("GetWindowLongW")
+	procSystemParametersInfo = user32.NewProc("SystemParametersInfoW")
 
 	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -56,8 +59,9 @@ const (
 	HWND_TOPMOST     = ^uintptr(0)     // -1
 	HWND_NOTOPMOST   = ^uintptr(0) - 1 // -2
 
-	GWL_EXSTYLE      = -20
-	WS_EX_TOPMOST    = 0x00000008
+	GWL_EXSTYLE     = -20
+	WS_EX_TOPMOST   = 0x00000008
+	SPI_GETWORKAREA = 0x0030
 
 	WPF_RESTORETOMAXIMIZED        = 0x0002
 	WPF_ASYNCWINDOWPLACEMENT      = 0x0004
@@ -433,9 +437,13 @@ func (m *Manager) OpenDashboard() error {
 
 	edgePath := findEdgeBinary()
 	if edgePath != "" {
-		// Use a dedicated Edge profile directory so --app always opens as a standalone frameless app window
-		// with its own taskbar icon and immediate window control.
-		profileDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "TraffCount", "WebViewProfile")
+		// Isolate Mini-Widget into its own Edge user-data-dir so a lingering normal-mode browser
+		// ProcessSingleton (e.g. 1920x1032) never hijacks widget launches with full-screen dimensions.
+		profileName := "WebViewProfile"
+		if inMini {
+			profileName = "WebViewProfileMini"
+		}
+		profileDir := filepath.Join(os.Getenv("LOCALAPPDATA"), "TraffCount", profileName)
 		_ = os.MkdirAll(profileDir, 0755)
 
 		var w, h, x, y int
@@ -447,7 +455,19 @@ func (m *Manager) OpenDashboard() error {
 				x, y, hasPos = miniX, miniY, true
 			} else if bounds.HasValue && bounds.X >= 0 && bounds.Y >= 0 {
 				x, y, hasPos = bounds.X, bounds.Y, true
+			} else {
+				wa := getWorkAreaRect()
+				x = int(wa.Right) - w - 32
+				y = int(wa.Bottom) - h - 32
+				if x < int(wa.Left) {
+					x = 120
+				}
+				if y < int(wa.Top) {
+					y = 80
+				}
+				hasPos = true
 			}
+			_ = ensureMiniProfilePlacement(profileDir, url, x, y, w, h)
 		} else {
 			w = bounds.Width
 			h = bounds.Height
@@ -467,7 +487,9 @@ func (m *Manager) OpenDashboard() error {
 			fmt.Sprintf("--user-data-dir=%s", profileDir),
 			fmt.Sprintf("--window-size=%d,%d", w, h),
 			"--no-first-run",
-			"--disable-features=Translate",
+			"--disable-background-mode",
+			"--disable-session-crashed-bubble",
+			"--disable-features=Translate,msEdgeStartupBoost",
 		}
 		if hasPos {
 			args = append(args, fmt.Sprintf("--window-position=%d,%d", x, y))
@@ -481,10 +503,10 @@ func (m *Manager) OpenDashboard() error {
 					m.launching = false
 					m.mu.Unlock()
 				}()
-				// Poll briefly for the window to appear so we can apply saved bounds, Always-On-Top, and focus
-				for i := 0; i < 35; i++ {
-					time.Sleep(100 * time.Millisecond)
-					if i == 10 && FindTraffCountWindow() == 0 {
+				// Poll quickly for the window to appear so saved bounds, Always-On-Top, and focus apply immediately.
+				for i := 0; i < 175; i++ {
+					time.Sleep(20 * time.Millisecond)
+					if i == 50 && FindAnyTraffCountWindow() == 0 {
 						// Retry launch once in case previous Edge instance was still releasing its profile lock
 						_ = exec.Command(edgePath, args...).Start()
 					}
@@ -516,6 +538,9 @@ func (m *Manager) OpenDashboard() error {
 }
 
 func (m *Manager) applyMiniToWindow(hwnd uintptr) {
+	if zoomed, _, _ := procIsZoomed.Call(hwnd); zoomed != 0 {
+		procShowWindow.Call(hwnd, SW_RESTORE)
+	}
 	m.mu.Lock()
 	miniHasPos := m.miniHasPos
 	miniX := m.miniX
@@ -535,6 +560,102 @@ func (m *Manager) applyMiniToWindow(hwnd uintptr) {
 		uintptr(miniWindowHeight),
 		flags,
 	)
+}
+
+func getWorkAreaRect() winRect {
+	var r winRect
+	if ret, _, _ := procSystemParametersInfo.Call(SPI_GETWORKAREA, 0, uintptr(unsafe.Pointer(&r)), 0); ret != 0 && (r.Right-r.Left) > 200 && (r.Bottom-r.Top) > 150 {
+		return r
+	}
+	return winRect{Left: 0, Top: 0, Right: 1920, Bottom: 1032}
+}
+
+// appPlacementPathParts splits Chromium's dotted app_window_placement key ("host_path")
+// the same way Chromium's SetByDottedPath splits IP addresses such as "127.0.0.1_/".
+func appPlacementPathParts(rawURL string) []string {
+	host := "127.0.0.1"
+	reqPath := "/"
+	if u, err := url.Parse(rawURL); err == nil {
+		if h := u.Hostname(); h != "" {
+			host = h
+		}
+		if p := u.EscapedPath(); p != "" {
+			reqPath = p
+		}
+	}
+	return strings.Split(host+"_"+reqPath, ".")
+}
+
+// ensureMiniProfilePlacement seeds Edge's Default/Preferences before launch so a fresh or
+// previously closed WebViewProfileMini window starts un-maximized at the exact mini-widget bounds.
+func ensureMiniProfilePlacement(profileDir, appURL string, x, y, w, h int) error {
+	defDir := filepath.Join(profileDir, "Default")
+	if err := os.MkdirAll(defDir, 0755); err != nil {
+		return err
+	}
+	prefsPath := filepath.Join(defDir, "Preferences")
+	prefs := make(map[string]any)
+	if raw, err := os.ReadFile(prefsPath); err == nil && len(raw) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(raw, &parsed) == nil && parsed != nil {
+			prefs = parsed
+		}
+	}
+
+	prefs["background_mode"] = map[string]any{
+		"enabled": false,
+	}
+
+	profMap, _ := prefs["profile"].(map[string]any)
+	if profMap == nil {
+		profMap = make(map[string]any)
+	}
+	profMap["exit_type"] = "Normal"
+	profMap["exited_cleanly"] = true
+	prefs["profile"] = profMap
+
+	browserMap, _ := prefs["browser"].(map[string]any)
+	if browserMap == nil {
+		browserMap = make(map[string]any)
+	}
+	delete(browserMap, "window_placement")
+
+	appMap, _ := browserMap["app_window_placement"].(map[string]any)
+	if appMap == nil {
+		appMap = make(map[string]any)
+	}
+
+	parts := appPlacementPathParts(appURL)
+	cur := appMap
+	for i := 0; i < len(parts)-1; i++ {
+		next, _ := cur[parts[i]].(map[string]any)
+		if next == nil {
+			next = make(map[string]any)
+			cur[parts[i]] = next
+		}
+		cur = next
+	}
+
+	wa := getWorkAreaRect()
+	cur[parts[len(parts)-1]] = map[string]any{
+		"left":             x,
+		"top":              y,
+		"right":            x + w,
+		"bottom":           y + h,
+		"maximized":        false,
+		"work_area_left":   int(wa.Left),
+		"work_area_top":    int(wa.Top),
+		"work_area_right":  int(wa.Right),
+		"work_area_bottom": int(wa.Bottom),
+	}
+	browserMap["app_window_placement"] = appMap
+	prefs["browser"] = browserMap
+
+	encoded, err := json.Marshal(prefs)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(prefsPath, encoded, 0644)
 }
 
 func applyWindowBounds(hwnd uintptr, b storage.WindowBounds) {

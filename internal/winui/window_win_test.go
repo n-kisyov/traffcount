@@ -3,6 +3,9 @@
 package winui
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 	"unsafe"
@@ -91,6 +94,89 @@ func TestPlanMinimizeHidesWaitsForAnimationAndCleansUp(t *testing.T) {
 	_ = m.planMinimizeHides(nil, t0.Add(time.Millisecond))
 	if len(m.iconicSince) != 0 {
 		t.Fatalf("expected stale iconicSince entries to be pruned, got %d remaining", len(m.iconicSince))
+	}
+}
+
+func TestAppPlacementPathParts(t *testing.T) {
+	got := appPlacementPathParts("http://127.0.0.1:9876")
+	want := []string{"127", "0", "0", "1_/"}
+	if len(got) != len(want) {
+		t.Fatalf("appPlacementPathParts len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("part[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestEnsureMiniProfilePlacement(t *testing.T) {
+	dir := t.TempDir()
+	defDir := filepath.Join(dir, "Default")
+	if err := os.MkdirAll(defDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	prefsPath := filepath.Join(defDir, "Preferences")
+
+	// Seed stale maximized normal placement and background mode enabled.
+	initial := map[string]any{
+		"background_mode": map[string]any{"enabled": true},
+		"browser": map[string]any{
+			"window_placement": map[string]any{"maximized": true},
+			"app_window_placement": map[string]any{
+				"127": map[string]any{
+					"0": map[string]any{
+						"0": map[string]any{
+							"1_/": map[string]any{
+								"maximized": true,
+								"left":      0,
+								"top":       0,
+								"right":     1920,
+								"bottom":    1032,
+							},
+						},
+					},
+				},
+			},
+		},
+		"custom_keep": "yes",
+	}
+	raw, _ := json.Marshal(initial)
+	if err := os.WriteFile(prefsPath, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureMiniProfilePlacement(dir, "http://127.0.0.1:9876", 1496, 712, miniWindowWidth, miniWindowHeight); err != nil {
+		t.Fatalf("ensureMiniProfilePlacement failed: %v", err)
+	}
+
+	updatedRaw, err := os.ReadFile(prefsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated map[string]any
+	if err := json.Unmarshal(updatedRaw, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated["custom_keep"] != "yes" {
+		t.Fatalf("expected existing preferences to be preserved")
+	}
+	bg, _ := updated["background_mode"].(map[string]any)
+	if bg == nil || bg["enabled"] != false {
+		t.Fatalf("expected background_mode.enabled == false, got %+v", bg)
+	}
+	browser, _ := updated["browser"].(map[string]any)
+	if _, hasStaleNormal := browser["window_placement"]; hasStaleNormal {
+		t.Fatalf("expected stale browser.window_placement to be cleared")
+	}
+
+	placement := browser["app_window_placement"].(map[string]any)["127"].(map[string]any)["0"].(map[string]any)["0"].(map[string]any)["1_/"].(map[string]any)
+	if placement["maximized"] != false {
+		t.Fatalf("expected maximized == false, got %v", placement["maximized"])
+	}
+	if int(placement["left"].(float64)) != 1496 || int(placement["top"].(float64)) != 712 ||
+		int(placement["right"].(float64)) != 1876 || int(placement["bottom"].(float64)) != 942 {
+		t.Fatalf("unexpected mini placement rect: %+v", placement)
 	}
 }
 
