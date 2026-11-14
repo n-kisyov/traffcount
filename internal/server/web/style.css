@@ -1571,4 +1571,141 @@ body.mini-mode .canvas-wrap {
   border-color: rgba(239, 68, 68, 0.4);
 }
 
+/* Speed Test History & Trend Panel */
+.speedtest-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.speedtest-history-panel {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.speedtest-history-panel.hidden {
+  display: none;
+}
+
+.st-hist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.st-hist-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.st-trend-wrap {
+  width: 100%;
+  height: 92px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  padding: 4px;
+}
+
+.st-trend-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Ping Sparklines & Target Config */
+.ping-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  vertical-align: middle;
+}
+
+.ping-spark {
+  display: inline-block;
+  width: 28px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.ping-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ping-targets-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ping-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ping-target-chip code {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.ping-target-del {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.ping-target-del:hover {
+  color: var(--danger);
+}
+
+/* Quota Projection & Firewall Allowed Badge */
+.quota-projection {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.quota-projection.over {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.fw-status-allowed {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(34, 197, 94, 0.14);
+  color: var(--success);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+body.mini-mode.mini-no-chart .chart-card {
+  display: none !important;
+}
+
 

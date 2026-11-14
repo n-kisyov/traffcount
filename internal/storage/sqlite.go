@@ -13,22 +13,31 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// PingTargetConfig represents a user-configured connectivity probe target.
+type PingTargetConfig struct {
+	Name    string `json:"name"`
+	Address string `json:"address"` // host:port or IP/hostname (defaults to :443 or :53)
+}
+
 // Settings holds persistent user preferences.
 type Settings struct {
-	Theme          string  `json:"theme"`          // "dark" (default), "antigravity", "nord", "dracula", "emerald", "light"
-	AlwaysOnTop    bool    `json:"alwaysOnTop"`    // Keep GUI window on top
-	StartOnBoot    bool    `json:"startOnBoot"`    // Start minimized to tray on system boot
-	StartMinimized bool    `json:"startMinimized"` // Start minimized to tray when launched manually
-	SpeedUnit      string  `json:"speedUnit"`      // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
-	HideLoopback   bool    `json:"hideLoopback"`   // Hide Loopback / tunnel adapters
-	RetentionDays  int     `json:"retentionDays"`  // How many days of history to keep (default 365)
-	RefreshRateMs  int     `json:"refreshRateMs"`  // Default 1000ms
-	DataCapEnabled bool    `json:"dataCapEnabled"` // Enable monthly/billing-cycle data cap
-	DataCapGB      float64 `json:"dataCapGB"`      // Monthly data cap in GB (e.g. 500)
-	DataCapIface       string  `json:"dataCapIface"`       // "all" or specific NIC ID
-	BillingDay         int     `json:"billingDay"`         // Day of month (1-28) when billing cycle resets
-	SpikeAlertMbps     float64 `json:"spikeAlertMbps"`     // Alert when sustained speed exceeds this Mbps (0 = disabled)
-	NewAppAlertEnabled bool    `json:"newAppAlertEnabled"` // Notify when a new app accesses the network for the first time
+	Theme              string             `json:"theme"`              // "dark" (default), "antigravity", "nord", "dracula", "emerald", "light"
+	AlwaysOnTop        bool               `json:"alwaysOnTop"`        // Keep GUI window on top
+	StartOnBoot        bool               `json:"startOnBoot"`        // Start minimized to tray on system boot
+	StartMinimized     bool               `json:"startMinimized"`     // Start minimized to tray when launched manually
+	SpeedUnit          string             `json:"speedUnit"`          // "bits" (Mbps/Kbps) or "bytes" (MB/s, KB/s)
+	HideLoopback       bool               `json:"hideLoopback"`       // Hide Loopback / tunnel adapters
+	RetentionDays      int                `json:"retentionDays"`      // Days of history to keep (365 default, -1 = unlimited)
+	RefreshRateMs      int                `json:"refreshRateMs"`      // UI/graph cadence: 500, 1000, or 2000 ms
+	DataCapEnabled     bool               `json:"dataCapEnabled"`     // Enable monthly/billing-cycle data cap
+	DataCapGB          float64            `json:"dataCapGB"`          // Monthly data cap in GB (e.g. 500)
+	DataCapIface       string             `json:"dataCapIface"`       // "all" or specific NIC ID
+	BillingDay         int                `json:"billingDay"`         // Day of month (1-28) when billing cycle resets
+	SpikeAlertMbps     float64            `json:"spikeAlertMbps"`     // Alert when sustained speed exceeds this Mbps (0 = disabled)
+	NewAppAlertEnabled bool               `json:"newAppAlertEnabled"` // Notify when a new app accesses the network for the first time
+	PingGateway        bool               `json:"pingGateway"`        // Auto-probe Windows Default Gateway IP
+	PingTargets        []PingTargetConfig `json:"pingTargets"`        // Additional custom probe targets
+	CompactMiniWidget  bool               `json:"compactMiniWidget"`  // Show mini 60s sparkline inside mini-widget
 }
 
 // WindowBounds stores the last screen coordinates and size of the dashboard window.
@@ -68,17 +77,19 @@ func isValidTheme(t string) bool {
 // DefaultSettings returns default app settings (Dark mode default).
 func DefaultSettings() Settings {
 	return Settings{
-		Theme:          "dark",
-		AlwaysOnTop:    false,
-		SpeedUnit:      "bits",
-		HideLoopback:   true,
-		RetentionDays:  365,
-		RefreshRateMs:  1000,
-		DataCapEnabled: false,
-		DataCapGB:      500,
-		DataCapIface:   "all",
-		BillingDay:     1,
-		SpikeAlertMbps: 0,
+		Theme:             "dark",
+		AlwaysOnTop:       false,
+		SpeedUnit:         "bits",
+		HideLoopback:      true,
+		RetentionDays:     365,
+		RefreshRateMs:     1000,
+		DataCapEnabled:    false,
+		DataCapGB:         500,
+		DataCapIface:      "all",
+		BillingDay:        1,
+		SpikeAlertMbps:    0,
+		PingGateway:       true,
+		CompactMiniWidget: true,
 	}
 }
 
@@ -232,6 +243,21 @@ func (s *Store) migrate() error {
 		blocked INTEGER NOT NULL DEFAULT 0
 	);
 
+	CREATE TABLE IF NOT EXISTS speed_tests (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		unloaded_ping_ms REAL NOT NULL DEFAULT 0,
+		jitter_ms REAL NOT NULL DEFAULT 0,
+		loaded_ping_ms REAL NOT NULL DEFAULT 0,
+		download_mbps REAL NOT NULL DEFAULT 0,
+		upload_mbps REAL NOT NULL DEFAULT 0,
+		bufferbloat_grade TEXT NOT NULL DEFAULT '',
+		server_label TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_speed_tests_ts ON speed_tests(ts DESC);
+
 	CREATE TABLE IF NOT EXISTS settings (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
@@ -242,6 +268,36 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
 	return nil
+}
+
+func normalizeSettings(cfg Settings) Settings {
+	if !isValidTheme(cfg.Theme) {
+		cfg.Theme = "dark"
+	}
+	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {
+		cfg.SpeedUnit = "bits"
+	}
+	if cfg.RetentionDays != -1 && cfg.RetentionDays <= 0 {
+		cfg.RetentionDays = 365
+	}
+	switch cfg.RefreshRateMs {
+	case 500, 1000, 2000, 5000:
+	default:
+		cfg.RefreshRateMs = 1000
+	}
+	if cfg.BillingDay < 1 || cfg.BillingDay > 28 {
+		cfg.BillingDay = 1
+	}
+	if cfg.DataCapIface == "" {
+		cfg.DataCapIface = "all"
+	}
+	if cfg.DataCapGB <= 0 {
+		cfg.DataCapGB = 500
+	}
+	if len(cfg.PingTargets) > 8 {
+		cfg.PingTargets = cfg.PingTargets[:8]
+	}
+	return cfg
 }
 
 // GetSettings retrieves application settings, or returns defaults if not yet saved.
@@ -259,22 +315,7 @@ func (s *Store) GetSettings() (Settings, error) {
 		return cfg, err
 	}
 	_ = json.Unmarshal([]byte(raw), &cfg)
-	if !isValidTheme(cfg.Theme) {
-		cfg.Theme = "dark"
-	}
-	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {
-		cfg.SpeedUnit = "bits"
-	}
-	if cfg.BillingDay < 1 || cfg.BillingDay > 28 {
-		cfg.BillingDay = 1
-	}
-	if cfg.DataCapIface == "" {
-		cfg.DataCapIface = "all"
-	}
-	if cfg.DataCapGB <= 0 {
-		cfg.DataCapGB = 500
-	}
-	return cfg, nil
+	return normalizeSettings(cfg), nil
 }
 
 // SaveSettings persists application settings to SQLite.
@@ -282,24 +323,7 @@ func (s *Store) SaveSettings(cfg Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !isValidTheme(cfg.Theme) {
-		cfg.Theme = "dark"
-	}
-	if cfg.SpeedUnit != "bits" && cfg.SpeedUnit != "bytes" {
-		cfg.SpeedUnit = "bits"
-	}
-	if cfg.RetentionDays <= 0 {
-		cfg.RetentionDays = 365
-	}
-	if cfg.BillingDay < 1 || cfg.BillingDay > 28 {
-		cfg.BillingDay = 1
-	}
-	if cfg.DataCapIface == "" {
-		cfg.DataCapIface = "all"
-	}
-	if cfg.DataCapGB <= 0 {
-		cfg.DataCapGB = 500
-	}
+	cfg = normalizeSettings(cfg)
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return err

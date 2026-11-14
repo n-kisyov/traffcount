@@ -5,6 +5,7 @@ package collector
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -70,14 +71,14 @@ func RunSpeedTest(ctx context.Context) SpeedTestResult {
 		}
 	}
 
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 
-	// 2. Measure Download Throughput + Loaded Ping concurrently
+	// 2. Measure Download Throughput (time-boxed up to 6s / 40MB) + Loaded Ping concurrently
 	loadedStop := make(chan struct{})
 	loadedPings := make(chan []float64, 1)
 	go func() {
 		var lp []float64
-		ticker := time.NewTicker(250 * time.Millisecond)
+		ticker := time.NewTicker(120 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
@@ -93,20 +94,26 @@ func RunSpeedTest(ctx context.Context) SpeedTestResult {
 		}
 	}()
 
-	dlReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://speed.cloudflare.com/__down?bytes=10000000", nil)
+	dlCtx, dlCancel := context.WithTimeout(ctx, 6*time.Second)
+	dlReq, err := http.NewRequestWithContext(dlCtx, http.MethodGet, "https://speed.cloudflare.com/__down?bytes=40000000", nil)
 	if err == nil {
 		dlStart := time.Now()
 		resp, err := client.Do(dlReq)
 		if err == nil {
-			n, _ := io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			dlElapsed := time.Since(dlStart).Seconds()
-			if dlElapsed > 0.05 && n > 0 {
-				mbps := (float64(n) * 8.0) / (dlElapsed * 1_000_000.0)
-				res.DownloadMbps = math.Round(mbps*100) / 100
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				n, _ := io.Copy(io.Discard, resp.Body)
+				dlElapsed := time.Since(dlStart).Seconds()
+				if dlElapsed > 0.02 && n > 0 {
+					mbps := (float64(n) * 8.0) / (dlElapsed * 1_000_000.0)
+					res.DownloadMbps = math.Round(mbps*100) / 100
+				}
+			} else if res.Error == "" {
+				res.Error = fmt.Sprintf("Download probe returned HTTP %d", resp.StatusCode)
 			}
+			_ = resp.Body.Close()
 		}
 	}
+	dlCancel()
 	close(loadedStop)
 	lpSamples := <-loadedPings
 	if len(lpSamples) > 0 {
@@ -119,21 +126,25 @@ func RunSpeedTest(ctx context.Context) SpeedTestResult {
 		res.LoadedPingMs = res.UnloadedPingMs
 	}
 
-	// 3. Measure Upload Throughput (2 MB payload to speed.cloudflare.com/__up)
-	payload := make([]byte, 2_000_000)
-	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://speed.cloudflare.com/__up", bytes.NewReader(payload))
-	if err == nil {
-		upReq.Header.Set("Content-Type", "application/octet-stream")
-		upStart := time.Now()
-		resp, err := client.Do(upReq)
-		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			upElapsed := time.Since(upStart).Seconds()
-			if upElapsed > 0.05 {
-				mbps := (float64(len(payload)) * 8.0) / (upElapsed * 1_000_000.0)
-				res.UploadMbps = math.Round(mbps*100) / 100
-			}
+	// 3. Adaptive Upload Throughput (1MB probe -> scale payload up to 16MB for high-speed links)
+	probeSize := 1_000_000
+	probeMb, probeElapsed, probeErr := measureUploadHTTP(ctx, client, probeSize)
+	if probeErr != "" && res.Error == "" {
+		res.Error = probeErr
+	} else if probeElapsed >= 0.8 && probeMb > 0 {
+		res.UploadMbps = math.Round(probeMb*100) / 100
+	} else if probeErr == "" {
+		targetSize := 2_000_000
+		if probeElapsed < 0.06 {
+			targetSize = 16_000_000
+		} else if probeElapsed < 0.25 {
+			targetSize = 6_000_000
+		}
+		upMb, _, upErr := measureUploadHTTP(ctx, client, targetSize)
+		if upErr != "" && res.Error == "" {
+			res.Error = upErr
+		} else if upMb > 0 {
+			res.UploadMbps = math.Round(upMb*100) / 100
 		}
 	}
 
@@ -161,6 +172,34 @@ func RunSpeedTest(ctx context.Context) SpeedTestResult {
 	}
 
 	return res
+}
+
+func measureUploadHTTP(ctx context.Context, client *http.Client, payloadBytes int) (mbps float64, elapsedSec float64, errMsg string) {
+	payload := make([]byte, payloadBytes)
+	upCtx, upCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer upCancel()
+
+	req, err := http.NewRequestWithContext(upCtx, http.MethodPost, "https://speed.cloudflare.com/__up", bytes.NewReader(payload))
+	if err != nil {
+		return 0, 0, err.Error()
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, time.Since(start).Seconds(), err.Error()
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	elapsed := time.Since(start).Seconds()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, elapsed, fmt.Sprintf("Upload probe returned HTTP %d", resp.StatusCode)
+	}
+	if elapsed <= 0.005 {
+		return 0, elapsed, ""
+	}
+	return (float64(payloadBytes) * 8.0) / (elapsed * 1_000_000.0), elapsed, ""
 }
 
 func measureTCPHandshakeMs(addr string, timeout time.Duration) float64 {

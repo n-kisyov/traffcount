@@ -202,7 +202,35 @@
                 <strong id="stGradeBadge" class="st-grade-badge">—</strong>
               </div>
             </div>
-            <button id="btnRunSpeedTest" class="btn-primary btn-sm">Run Speed Test</button>
+            <div class="speedtest-actions">
+              <button id="btnSpeedTestHistory" class="btn-secondary btn-sm" title="Show recent speed test history &amp; trend">History (<span id="stHistCount">0</span>)</button>
+              <button id="btnRunSpeedTest" class="btn-primary btn-sm">Run Speed Test</button>
+            </div>
+          </div>
+          <div id="speedTestHistoryPanel" class="speedtest-history-panel hidden">
+            <div class="st-hist-header">
+              <span class="st-hist-title">Recent Speed Test Runs &amp; Latency Trend</span>
+              <button id="btnClearSpeedHistory" class="tbl-btn danger">Clear History</button>
+            </div>
+            <div class="st-trend-wrap">
+              <canvas id="speedTestTrendCanvas"></canvas>
+            </div>
+            <div class="table-scroll" style="max-height:190px">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Tested At</th>
+                    <th class="num">Download</th>
+                    <th class="num">Upload</th>
+                    <th class="num">Unloaded</th>
+                    <th class="num">Loaded</th>
+                    <th class="num">Jitter</th>
+                    <th>Grade</th>
+                  </tr>
+                </thead>
+                <tbody id="speedTestHistoryBody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -231,6 +259,7 @@
               <div class="segmented-control" id="connSubTabSelector">
                 <button class="seg-btn active" data-subview="sockets">Sockets List</button>
                 <button class="seg-btn" data-subview="processes">By Process</button>
+                <button class="seg-btn" data-subview="firewall">Firewall / All Apps</button>
               </div>
 
               <div class="segmented-control" id="connStateFilter">
@@ -239,9 +268,14 @@
                 <button class="seg-btn" data-state="LISTEN">Listening</button>
               </div>
 
-              <label class="conn-chk-label" title="Include UDP endpoints">
+              <label class="conn-chk-label" id="connIncludeUdpWrap" title="Include UDP endpoints">
                 <input type="checkbox" id="chkIncludeUDP" />
                 <span>+UDP</span>
+              </label>
+
+              <label class="conn-chk-label hidden" id="connBlockedOnlyWrap" title="Show only firewall-blocked applications">
+                <input type="checkbox" id="chkBlockedOnly" />
+                <span>Blocked Only</span>
               </label>
 
               <input type="text" id="connSearchInput" class="input-control conn-search" placeholder="Filter app, IP, port, PID..." />
@@ -283,6 +317,22 @@
                 </tr>
               </thead>
               <tbody id="connProcTableBody"></tbody>
+            </table>
+
+            <table class="data-table hidden" id="connFirewallTable">
+              <thead>
+                <tr>
+                  <th>Application</th>
+                  <th>Executable Path</th>
+                  <th>Last Seen</th>
+                  <th class="num">Inbound</th>
+                  <th class="num">Outbound</th>
+                  <th class="num">Total Historical</th>
+                  <th>Status</th>
+                  <th class="num">Firewall Rule</th>
+                </tr>
+              </thead>
+              <tbody id="connFirewallTableBody"></tbody>
             </table>
           </div>
         </div>
@@ -333,6 +383,7 @@
           <div class="quota-bar-track">
             <div id="quotaBarFill" class="quota-bar-fill" style="width:0%"></div>
           </div>
+          <div id="quotaProjectionText" class="quota-projection"></div>
         </div>
 
         <div class="kpi-grid kpi-grid-4">
@@ -495,6 +546,29 @@
                 <span class="toggle-slider"></span>
               </label>
             </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">UI &amp; Graph Update Cadence</div>
+                <div class="setting-hint">Controls dashboard redraw and live socket table polling frequency.</div>
+              </div>
+              <div class="segmented-control" id="refreshRateSelector">
+                <button class="seg-btn active" data-rate-val="1000">1s (Live)</button>
+                <button class="seg-btn" data-rate-val="2000">2s (Eco)</button>
+                <button class="seg-btn" data-rate-val="5000">5s (Low CPU)</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Show Sparkline in Mini-Widget</div>
+                <div class="setting-hint">Include the 60-second throughput graph beneath speeds in Mini-Widget mode.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkCompactMiniWidget" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
           </div>
 
           <div class="settings-card">
@@ -578,10 +652,54 @@
           </div>
 
           <div class="settings-card">
+            <h3>Connectivity &amp; Ping Monitors</h3>
+            <p class="settings-desc">
+              Configure real-time ICMP/TCP latency &amp; packet-loss probes shown on the dashboard.
+            </p>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Auto-Probe Default Gateway (ICMP)</div>
+                <div class="setting-hint">Continuously ping your router / gateway IP to separate LAN/Wi-Fi jitter from ISP latency.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkPingGateway" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row setting-row-col">
+              <div>
+                <div class="setting-title">Custom Monitor Targets</div>
+                <div class="setting-hint">Add any IP, hostname (ICMP), or <code>host:port</code> (TCP) target alongside 1.1.1.1 and 8.8.8.8.</div>
+              </div>
+              <div class="ping-add-row">
+                <input type="text" id="pingTargetNameInput" class="input-control" placeholder="Label (e.g. Quad9)" style="flex:1;min-width:110px" />
+                <input type="text" id="pingTargetAddrInput" class="input-control" placeholder="Host/IP or host:port (e.g. 9.9.9.9)" style="flex:1.4;min-width:150px" />
+                <button id="btnAddPingTarget" class="btn-primary btn-sm">Add</button>
+              </div>
+              <div id="pingTargetsList" class="ping-targets-list"></div>
+            </div>
+          </div>
+
+          <div class="settings-card">
             <h3>Database &amp; Maintenance</h3>
             <p class="settings-desc">
-              Download a full SQLite snapshot of your historical traffic database or clear accumulated traffic counters.
+              Configure historical retention, download an atomic SQLite snapshot, or clear traffic counters.
             </p>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">History Retention Period</div>
+                <div class="setting-hint">Automatically prune hourly and per-app counters older than the selected window.</div>
+              </div>
+              <select id="selectRetentionDays" class="select-control" style="min-width:140px">
+                <option value="30">30 Days</option>
+                <option value="90">90 Days</option>
+                <option value="365">365 Days (1 Year)</option>
+                <option value="-1">Unlimited</option>
+              </select>
+            </div>
 
             <div class="service-actions">
               <button id="btnBackupDB" class="btn-secondary">Download Database Backup (.db)</button>
@@ -589,7 +707,7 @@
             </div>
 
             <div class="settings-note" id="dbActionStatus">
-              Database is automatically compacted and pruned according to your retention period (365 days).
+              Database is automatically checkpointed on backup and pruned on startup according to your retention period.
             </div>
           </div>
         </div>
@@ -597,7 +715,7 @@
     </main>
   </div>
 
-  <script src="/app.js?v=14"></script>
+  <script src="/app.js?v=15"></script>
 </body>
 </html>
 

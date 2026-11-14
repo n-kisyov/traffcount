@@ -215,7 +215,78 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 		t.Errorf("unexpected ByProcess breakdown: %+v", repWithProcs.ByProcess)
 	}
 
-	// 8. Test ResetTrafficHistory
+	// 8. Test ListKnownApps (including blocked + byte sums)
+	apps, err := store.ListKnownApps()
+	if err != nil {
+		t.Fatalf("list known apps: %v", err)
+	}
+	if len(apps) != 3 || !apps[0].Blocked || apps[0].ProcessName != "code.exe" {
+		t.Errorf("expected code.exe first and blocked in ListKnownApps, got %+v", apps)
+	}
+
+	// 9. Test SpeedTestRecord persistence
+	if err := store.RecordSpeedTest(SpeedTestRecord{
+		Timestamp:        now.Unix(),
+		UnloadedPingMs:   12.3,
+		JitterMs:         1.4,
+		LoadedPingMs:     18.6,
+		DownloadMbps:     450.5,
+		UploadMbps:       120.2,
+		BufferbloatGrade: "A",
+		ServerLabel:      "Test",
+	}); err != nil {
+		t.Fatalf("record speed test: %v", err)
+	}
+	stList, err := store.ListSpeedTests(10)
+	if err != nil || len(stList) != 1 || stList[0].DownloadMbps != 450.5 {
+		t.Errorf("unexpected speed tests list: %+v err=%v", stList, err)
+	}
+
+	// 10. Test QuotaStatus projection math
+	cfg2.DataCapEnabled = true
+	cfg2.DataCapGB = 10
+	cfg2.BillingDay = 1
+	cfg2.RetentionDays = 30
+	cfg2.RefreshRateMs = 500
+	if err := store.SaveSettings(cfg2); err != nil {
+		t.Fatalf("save settings quota: %v", err)
+	}
+	qs, err := store.QueryQuotaStatus()
+	if err != nil {
+		t.Fatalf("query quota status: %v", err)
+	}
+	if !qs.Enabled || qs.TotalCycleDays < 28 || qs.DaysElapsed < 1 || qs.ProjectedTotalBytes == 0 {
+		t.Errorf("unexpected quota projection: %+v", qs)
+	}
+
+	// 11. Test BackupTo (WAL-safe VACUUM INTO) and PruneOldData
+	backupPath := filepath.Join(tmpDir, "backup_snapshot.db")
+	if err := store.BackupTo(backupPath); err != nil {
+		t.Fatalf("BackupTo failed: %v", err)
+	}
+	bStore, err := Open(backupPath)
+	if err != nil {
+		t.Fatalf("open backup store: %v", err)
+	}
+	bApps, err := bStore.ListKnownApps()
+	bStore.Close()
+	if err != nil || len(bApps) != 3 {
+		t.Errorf("expected 3 known apps inside backup snapshot, got %d (err=%v)", len(bApps), err)
+	}
+
+	// Prune 10 days -> removes day20Ago bucket while preserving day5Ago & day1Ago
+	if err := store.PruneOldData(10); err != nil {
+		t.Fatalf("prune old data: %v", err)
+	}
+	repAfterPrune, err := store.QueryHistory(start30, now, "all")
+	if err != nil {
+		t.Fatalf("query after prune: %v", err)
+	}
+	if repAfterPrune.TotalRxBytes >= want30Rx {
+		t.Errorf("expected 20-day old bucket pruned (< %d), got %d", want30Rx, repAfterPrune.TotalRxBytes)
+	}
+
+	// 12. Test ResetTrafficHistory and ClearSpeedTests
 	if err := store.ResetTrafficHistory(); err != nil {
 		t.Fatalf("reset traffic history: %v", err)
 	}
@@ -225,6 +296,12 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 	}
 	if repAfterReset.CombinedBytes != 0 || len(repAfterReset.ByProcess) != 0 {
 		t.Errorf("expected 0 traffic after reset, got combined=%d procs=%d", repAfterReset.CombinedBytes, len(repAfterReset.ByProcess))
+	}
+	if err := store.ClearSpeedTests(); err != nil {
+		t.Fatalf("clear speed tests: %v", err)
+	}
+	if stAfter, _ := store.ListSpeedTests(10); len(stAfter) != 0 {
+		t.Errorf("expected 0 speed tests after clear, got %d", len(stAfter))
 	}
 }
 

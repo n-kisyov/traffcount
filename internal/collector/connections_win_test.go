@@ -170,3 +170,24 @@ func TestLiveTCPEStatsV6Probe(t *testing.T) {
 		t.Errorf("expected GetPerTcp6ConnectionEStats ret=0, got %d", ret)
 	}
 }
+
+func TestICMPStructAndPingHelpers(t *testing.T) {
+	if sz := unsafe.Sizeof(icmpEchoReply{}); sz != 40 {
+		t.Fatalf("expected sizeof(icmpEchoReply) == 40, got %d", sz)
+	}
+	ms, ok := icmpPingIPv4(net.IPv4(127, 0, 0, 1), 800*time.Millisecond)
+	if !ok || ms < 1 {
+		t.Errorf("expected localhost ICMP ping success, got ok=%v ms=%d", ok, ms)
+	}
+
+	ip, scope := parseIPv6AndScope("fe80::1%12")
+	if ip == nil || scope != 12 {
+		t.Errorf("expected fe80::1 with scope 12, got ip=%v scope=%d", ip, scope)
+	}
+
+	// Non-DNS /8 ranges like 52.94.x.x (AWS) must NOT be pre-labeled Azure
+	host, cc, _ := classifyWellKnownIP("52.94.236.248")
+	if host != "" || cc != "" {
+		t.Errorf("expected 52.94.236.248 not statically classified, got host=%q cc=%q", host, cc)
+	}
+}

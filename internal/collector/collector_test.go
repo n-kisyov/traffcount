@@ -1,6 +1,11 @@
 package collector
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"traffcount/internal/storage"
+)
 
 func TestComputeDelta(t *testing.T) {
 	// Normal increment
@@ -21,6 +26,25 @@ func TestMakeInterfaceID(t *testing.T) {
 	id := MakeInterfaceID("Ethernet", "AA:BB:CC:DD:EE:FF")
 	if id != "Ethernet_AABBCCDDEEFF" {
 		t.Errorf("unexpected id: %s", id)
+	}
+}
+
+func TestCollectorResetBuffers(t *testing.T) {
+	c := New(nil)
+	c.counters["eth0"] = &rawCounter{sessionRx: 5000, sessionTx: 1200}
+	c.pendingDB["eth0"] = &storage.TrafficDelta{
+		IfaceID:   "eth0",
+		RxBytes:   5000,
+		TxBytes:   1200,
+		Timestamp: time.Now(),
+	}
+	c.ResetBuffers()
+
+	if len(c.pendingDB) != 0 {
+		t.Errorf("expected pendingDB cleared after ResetBuffers, got %d", len(c.pendingDB))
+	}
+	if c.counters["eth0"].sessionRx != 0 || c.counters["eth0"].sessionTx != 0 {
+		t.Errorf("expected session counters zeroed, got rx=%d tx=%d", c.counters["eth0"].sessionRx, c.counters["eth0"].sessionTx)
 	}
 }
 

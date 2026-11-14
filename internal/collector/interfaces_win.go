@@ -19,6 +19,7 @@ type AdapterMeta struct {
 	MAC         string
 	IPv4        string
 	IPv6        string
+	Gateway     string
 	LinkSpeed   uint64 // bits per second
 	IsLoopback  bool
 	IsUp        bool
@@ -32,7 +33,7 @@ func GetWindowsAdapters() map[string]AdapterMeta {
 	var buf []byte
 	var err error
 
-	flags := uint32(windows.GAA_FLAG_INCLUDE_PREFIX)
+	flags := uint32(windows.GAA_FLAG_INCLUDE_PREFIX | 0x0080) // 0x0080 = GAA_FLAG_INCLUDE_GATEWAY
 	for i := 0; i < 3; i++ {
 		buf = make([]byte, size)
 		err = windows.GetAdaptersAddresses(
@@ -85,6 +86,21 @@ func GetWindowsAdapters() map[string]AdapterMeta {
 			}
 		}
 
+		var gwIP string
+		for ga := aa.FirstGatewayAddress; ga != nil; ga = ga.Next {
+			if ga.Address.Sockaddr == nil {
+				continue
+			}
+			ip := sockaddrToIP(ga.Address.Sockaddr)
+			if ip == nil {
+				continue
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				gwIP = ip4.String()
+				break
+			}
+		}
+
 		isLoopback := aa.IfType == windows.IF_TYPE_SOFTWARE_LOOPBACK
 		isUp := aa.OperStatus == windows.IfOperStatusUp
 
@@ -100,6 +116,7 @@ func GetWindowsAdapters() map[string]AdapterMeta {
 			MAC:         mac,
 			IPv4:        ipv4,
 			IPv6:        ipv6,
+			Gateway:     gwIP,
 			LinkSpeed:   linkSpeed,
 			IsLoopback:  isLoopback,
 			IsUp:        isUp,
@@ -108,6 +125,17 @@ func GetWindowsAdapters() map[string]AdapterMeta {
 	}
 
 	return result
+}
+
+// GetDefaultGatewayIP returns the primary active IPv4 default gateway address, or "".
+func GetDefaultGatewayIP() string {
+	adapters := GetWindowsAdapters()
+	for _, a := range adapters {
+		if a.IsUp && !a.IsLoopback && a.Gateway != "" {
+			return a.Gateway
+		}
+	}
+	return ""
 }
 
 func sockaddrToIP(sa *syscall.RawSockaddrAny) net.IP {

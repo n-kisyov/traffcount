@@ -160,10 +160,15 @@ func (c *Collector) LatestSnapshot() RealtimePayload {
 	return c.lastPayload
 }
 
-// Run starts the 1Hz polling loop and 15-second SQLite flush loop until ctx is canceled.
+// Run starts the 1Hz polling loop, connectivity probes, DB flush, and retention pruning until ctx is canceled.
 func (c *Collector) Run(ctx context.Context) {
+	// Enforce configured history retention on startup
+	if cfg, err := c.store.GetSettings(); err == nil && cfg.RetentionDays > 0 {
+		_ = c.store.PruneOldData(cfg.RetentionDays)
+	}
+
 	// Initial sample to seed counters and connectivity probe
-	go ProbeConnectivity()
+	go c.probeWithSettings()
 	go func() {
 		_ = GetActiveConnections("", false)
 		c.FlushToDB()
@@ -174,10 +179,12 @@ func (c *Collector) Run(ctx context.Context) {
 	flushTicker := time.NewTicker(15 * time.Second)
 	diagTicker := time.NewTicker(3 * time.Second)
 	procTicker := time.NewTicker(2 * time.Second)
+	pruneTicker := time.NewTicker(24 * time.Hour)
 	defer pollTicker.Stop()
 	defer flushTicker.Stop()
 	defer diagTicker.Stop()
 	defer procTicker.Stop()
+	defer pruneTicker.Stop()
 
 	for {
 		select {
@@ -191,13 +198,42 @@ func (c *Collector) Run(ctx context.Context) {
 		case <-flushTicker.C:
 			c.FlushToDB()
 		case <-diagTicker.C:
-			go ProbeConnectivity()
+			go c.probeWithSettings()
 		case <-procTicker.C:
 			go func() {
 				_ = GetActiveConnections("", false)
 			}()
+		case <-pruneTicker.C:
+			if cfg, err := c.store.GetSettings(); err == nil && cfg.RetentionDays > 0 {
+				_ = c.store.PruneOldData(cfg.RetentionDays)
+			}
 		}
 	}
+}
+
+func (c *Collector) probeWithSettings() {
+	if c.store == nil {
+		ProbeConnectivity()
+		return
+	}
+	cfg, err := c.store.GetSettings()
+	if err != nil {
+		ProbeConnectivity()
+		return
+	}
+	ProbeConnectivityWithConfig(cfg.PingGateway, cfg.PingTargets)
+}
+
+// ResetBuffers discards pending in-memory DB deltas and resets session/process counters.
+func (c *Collector) ResetBuffers() {
+	c.mu.Lock()
+	c.pendingDB = make(map[string]*storage.TrafficDelta)
+	for _, rc := range c.counters {
+		rc.sessionRx = 0
+		rc.sessionTx = 0
+	}
+	c.mu.Unlock()
+	ResetProcessBuffers()
 }
 
 func (c *Collector) broadcast(p RealtimePayload) {
@@ -231,19 +267,32 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 	now := time.Now()
 	unixNow := now.Unix()
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Perform SQLite settings lookup, Windows adapter enumeration, and IOCounters outside c.mu.Lock()
+	// so /api/realtime readers are never blocked on I/O.
+	c.mu.RLock()
+	needMetaRefresh := time.Since(c.metaUpdated) > 10*time.Second || len(c.metaCache) == 0
+	c.mu.RUnlock()
 
-	if time.Since(c.metaUpdated) > 10*time.Second || len(c.metaCache) == 0 {
-		c.metaCache = GetWindowsAdapters()
-		c.metaUpdated = now
+	var freshMeta map[string]AdapterMeta
+	if needMetaRefresh {
+		freshMeta = GetWindowsAdapters()
 	}
-
 	settings, _ := c.store.GetSettings()
 
 	ioCounters, err := psnet.IOCounters(true)
 	if err != nil {
-		return c.lastPayload
+		c.mu.RLock()
+		last := c.lastPayload
+		c.mu.RUnlock()
+		return last
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if freshMeta != nil {
+		c.metaCache = freshMeta
+		c.metaUpdated = now
 	}
 
 	var totalRxBps, totalTxBps uint64

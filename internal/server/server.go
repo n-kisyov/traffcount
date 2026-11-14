@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -31,7 +32,7 @@ type Server struct {
 	store        *storage.Store
 	collector    *collector.Collector
 	winMgr       *winui.Manager
-	miniMode     bool
+	miniMode     atomic.Bool
 	onTopChanged func(bool)
 	upgrader     websocket.Upgrader
 	httpSrv      *http.Server
@@ -56,8 +57,10 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/api/realtime", s.handleRealtime)
 	mux.HandleFunc("/api/connections", s.handleConnections)
 	mux.HandleFunc("/api/connections/action", s.handleConnectionsAction)
+	mux.HandleFunc("/api/apps", s.handleApps)
 	mux.HandleFunc("/api/firewall/block", s.handleFirewallBlock)
 	mux.HandleFunc("/api/speedtest", s.handleSpeedTest)
+	mux.HandleFunc("/api/speedtest/history", s.handleSpeedTestHistory)
 	mux.HandleFunc("/api/db/backup", s.handleDBBackup)
 	mux.HandleFunc("/api/db/reset", s.handleDBReset)
 	mux.HandleFunc("/api/alerts/new-apps", s.handleAlertsNewApps)
@@ -282,7 +285,7 @@ func (s *Server) handleHistoryExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWindowMini(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"mini": s.miniMode,
+			"mini": s.miniMode.Load(),
 		})
 		return
 	}
@@ -297,7 +300,7 @@ func (s *Server) handleWindowMini(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	s.miniMode = req.Mini
+	s.miniMode.Store(req.Mini)
 	applied := false
 	if s.winMgr != nil {
 		applied = s.winMgr.SetMiniMode(req.Mini)
@@ -390,19 +393,81 @@ func (s *Server) handleFirewallBlock(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
+	if s.collector != nil {
+		s.collector.FlushToDB()
+	}
+	apps, err := s.store.ListKnownApps()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if apps == nil {
+		apps = []storage.KnownAppRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"apps": apps})
+}
+
 func (s *Server) handleSpeedTest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	res := collector.RunSpeedTest(r.Context())
+	if s.store != nil && (res.DownloadMbps > 0 || res.UploadMbps > 0 || res.UnloadedPingMs > 0) {
+		_ = s.store.RecordSpeedTest(storage.SpeedTestRecord{
+			Timestamp:        res.Timestamp,
+			UnloadedPingMs:   res.UnloadedPingMs,
+			JitterMs:         res.JitterMs,
+			LoadedPingMs:     res.LoadedPingMs,
+			DownloadMbps:     res.DownloadMbps,
+			UploadMbps:       res.UploadMbps,
+			BufferbloatGrade: res.BufferbloatGrade,
+			ServerLabel:      res.ServerLabel,
+			Error:            res.Error,
+		})
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) handleSpeedTestHistory(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.store.ListSpeedTests(30)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"history": items})
+	case http.MethodDelete, http.MethodPost:
+		if err := s.store.ClearSpeedTests(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleDBBackup(w http.ResponseWriter, r *http.Request) {
-	s.collector.FlushToDB()
-	dbPath := s.store.DBPath()
-	data, err := os.ReadFile(dbPath)
+	if s.collector != nil {
+		s.collector.FlushToDB()
+	}
+	tmp, err := os.CreateTemp("", "traffcount-backup-*.db")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	if err := s.store.BackupTo(tmpPath); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	data, err := os.ReadFile(tmpPath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -417,6 +482,9 @@ func (s *Server) handleDBReset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
+	}
+	if s.collector != nil {
+		s.collector.ResetBuffers()
 	}
 	if err := s.store.ResetTrafficHistory(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -515,6 +583,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		if cfg.RetentionDays > 0 {
+			go func(days int) { _ = s.store.PruneOldData(days) }(cfg.RetentionDays)
+		}
+		go collector.ProbeConnectivityWithConfig(cfg.PingGateway, cfg.PingTargets)
 		if s.winMgr != nil {
 			s.winMgr.SetAlwaysOnTop(cfg.AlwaysOnTop)
 		}

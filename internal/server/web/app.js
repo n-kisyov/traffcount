@@ -18,6 +18,9 @@
       billingDay: 1,
       spikeAlertMbps: 0,
       newAppAlertEnabled: false,
+      pingGateway: true,
+      pingTargets: [],
+      compactMiniWidget: true,
     },
     miniMode: false,
     wasMaximizedBeforeMini: false,
@@ -32,12 +35,18 @@
     },
     historyReport: null,
     connectionsSnap: null,
+    knownApps: [],
+    speedTestHistory: [],
     connFilter: {
-      subview: "sockets", // "sockets" or "processes"
+      subview: "sockets", // "sockets", "processes", or "firewall"
       state: "ALL",       // "ALL", "ESTABLISHED", "LISTEN"
       includeUDP: false,
+      blockedOnly: false,
       search: "",
     },
+    lastConnFetchAt: 0,
+    lastHistFetchAt: 0,
+    lastRtRenderAt: 0,
     rtHover: null,        // { x, y, index }
     histHover: null,      // { x, y, index }
     currentRtPoints: [],
@@ -89,13 +98,19 @@
   const connCountUdpWrapEl = document.getElementById("connCountUdpWrap");
   const connCountUdpEl = document.getElementById("connCountUdp");
   const connSubTabBtns = document.querySelectorAll("#connSubTabSelector .seg-btn");
+  const connStateFilterEl = document.getElementById("connStateFilter");
   const connStateBtns = document.querySelectorAll("#connStateFilter .seg-btn");
+  const connIncludeUdpWrapEl = document.getElementById("connIncludeUdpWrap");
   const chkIncludeUDP = document.getElementById("chkIncludeUDP");
+  const connBlockedOnlyWrapEl = document.getElementById("connBlockedOnlyWrap");
+  const chkBlockedOnly = document.getElementById("chkBlockedOnly");
   const connSearchInput = document.getElementById("connSearchInput");
   const connSocketsTable = document.getElementById("connSocketsTable");
   const connProcessesTable = document.getElementById("connProcessesTable");
+  const connFirewallTable = document.getElementById("connFirewallTable");
   const connTableBody = document.getElementById("connTableBody");
   const connProcTableBody = document.getElementById("connProcTableBody");
+  const connFirewallTableBody = document.getElementById("connFirewallTableBody");
 
   // History DOM
   const periodPills = document.querySelectorAll("#periodPills .pill-btn");
@@ -111,6 +126,7 @@
   const quotaUsedText = document.getElementById("quotaUsedText");
   const quotaPctBadge = document.getElementById("quotaPctBadge");
   const quotaBarFill = document.getElementById("quotaBarFill");
+  const quotaProjectionText = document.getElementById("quotaProjectionText");
   const histTotalRxEl = document.getElementById("histTotalRx");
   const histTotalTxEl = document.getElementById("histTotalTx");
   const histCombinedEl = document.getElementById("histCombined");
@@ -124,6 +140,12 @@
 
   // Speed Test DOM
   const btnRunSpeedTest = document.getElementById("btnRunSpeedTest");
+  const btnSpeedTestHistory = document.getElementById("btnSpeedTestHistory");
+  const stHistCountEl = document.getElementById("stHistCount");
+  const speedTestHistoryPanel = document.getElementById("speedTestHistoryPanel");
+  const speedTestTrendCanvas = document.getElementById("speedTestTrendCanvas");
+  const speedTestHistoryBody = document.getElementById("speedTestHistoryBody");
+  const btnClearSpeedHistory = document.getElementById("btnClearSpeedHistory");
   const stStatusText = document.getElementById("stStatusText");
   const stDownMbps = document.getElementById("stDownMbps");
   const stUpMbps = document.getElementById("stUpMbps");
@@ -135,10 +157,18 @@
   // Settings DOM
   const themeButtons = document.querySelectorAll("#themeSelector .seg-btn");
   const unitButtons = document.querySelectorAll("#unitSelector .seg-btn");
+  const refreshRateButtons = document.querySelectorAll("#refreshRateSelector .seg-btn");
   const chkAlwaysOnTop = document.getElementById("chkAlwaysOnTop");
   const chkStartOnBoot = document.getElementById("chkStartOnBoot");
   const chkStartMinimized = document.getElementById("chkStartMinimized");
   const chkHideLoopback = document.getElementById("chkHideLoopback");
+  const chkCompactMiniWidget = document.getElementById("chkCompactMiniWidget");
+  const chkPingGateway = document.getElementById("chkPingGateway");
+  const pingTargetNameInput = document.getElementById("pingTargetNameInput");
+  const pingTargetAddrInput = document.getElementById("pingTargetAddrInput");
+  const btnAddPingTarget = document.getElementById("btnAddPingTarget");
+  const pingTargetsList = document.getElementById("pingTargetsList");
+  const selectRetentionDays = document.getElementById("selectRetentionDays");
   const chkDataCapEnabled = document.getElementById("chkDataCapEnabled");
   const inputDataCapGB = document.getElementById("inputDataCapGB");
   const inputBillingDay = document.getElementById("inputBillingDay");
@@ -212,11 +242,24 @@
     unitButtons.forEach((btn) => {
       btn.classList.toggle("active", btn.dataset.unitVal === state.settings.speedUnit);
     });
+    const curRate = String(state.settings.refreshRateMs || 1000);
+    refreshRateButtons.forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.rateVal === curRate);
+    });
+    const wsTxtEl = document.getElementById("wsStatusText");
+    if (wsTxtEl && document.querySelector("#wsStatus .status-dot")?.classList.contains("online")) {
+      wsTxtEl.textContent = curRate === "1000" ? "Live (1s)" : `Live (${Number(curRate) / 1000}s)`;
+    }
 
     chkAlwaysOnTop.checked = !!state.settings.alwaysOnTop;
     if (chkStartOnBoot) chkStartOnBoot.checked = !!state.settings.startOnBoot;
     if (chkStartMinimized) chkStartMinimized.checked = !!state.settings.startMinimized;
     chkHideLoopback.checked = !!state.settings.hideLoopback;
+    if (chkCompactMiniWidget) chkCompactMiniWidget.checked = state.settings.compactMiniWidget !== false;
+    document.body.classList.toggle("mini-no-chart", state.settings.compactMiniWidget === false);
+    if (chkPingGateway) chkPingGateway.checked = state.settings.pingGateway !== false;
+    if (selectRetentionDays) selectRetentionDays.value = String(state.settings.retentionDays || 365);
+    renderPingTargetsList();
     if (chkDataCapEnabled) chkDataCapEnabled.checked = !!state.settings.dataCapEnabled;
     if (inputDataCapGB) inputDataCapGB.value = state.settings.dataCapGB || 500;
     if (inputBillingDay) inputBillingDay.value = state.settings.billingDay || 1;
@@ -306,6 +349,76 @@
     saveSettings({ hideLoopback: e.target.checked });
   });
 
+  if (chkCompactMiniWidget) {
+    chkCompactMiniWidget.addEventListener("change", (e) => {
+      saveSettings({ compactMiniWidget: e.target.checked });
+    });
+  }
+
+  refreshRateButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const ms = parseInt(btn.dataset.rateVal, 10) || 1000;
+      saveSettings({ refreshRateMs: ms });
+    });
+  });
+
+  if (chkPingGateway) {
+    chkPingGateway.addEventListener("change", (e) => {
+      saveSettings({ pingGateway: e.target.checked });
+    });
+  }
+
+  function renderPingTargetsList() {
+    if (!pingTargetsList) return;
+    const targets = state.settings.pingTargets || [];
+    if (targets.length === 0) {
+      pingTargetsList.innerHTML = `<span class="setting-hint">Built-in targets active: Default Gateway (if enabled), 1.1.1.1:53, 8.8.8.8:53</span>`;
+      return;
+    }
+    pingTargetsList.innerHTML = targets
+      .map(
+        (t, idx) => `
+      <span class="ping-target-chip">
+        <span>${escapeHtml(t.name || t.address)}</span>
+        <code>${escapeHtml(t.address)}</code>
+        <button class="ping-target-del" data-ping-del="${idx}" title="Remove target">&times;</button>
+      </span>
+    `
+      )
+      .join("");
+    pingTargetsList.querySelectorAll("button[data-ping-del]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const idx = parseInt(btn.dataset.pingDel, 10);
+        const next = (state.settings.pingTargets || []).filter((_, i) => i !== idx);
+        saveSettings({ pingTargets: next });
+      });
+    });
+  }
+
+  if (btnAddPingTarget) {
+    btnAddPingTarget.addEventListener("click", () => {
+      const addr = (pingTargetAddrInput?.value || "").trim();
+      if (!addr) return;
+      const name = (pingTargetNameInput?.value || "").trim() || addr;
+      const cur = Array.isArray(state.settings.pingTargets) ? [...state.settings.pingTargets] : [];
+      if (cur.length >= 8) {
+        alert("Maximum 8 custom ping targets supported.");
+        return;
+      }
+      cur.push({ name, address: addr });
+      if (pingTargetNameInput) pingTargetNameInput.value = "";
+      if (pingTargetAddrInput) pingTargetAddrInput.value = "";
+      saveSettings({ pingTargets: cur });
+    });
+  }
+
+  if (selectRetentionDays) {
+    selectRetentionDays.addEventListener("change", () => {
+      const days = parseInt(selectRetentionDays.value, 10) || 365;
+      saveSettings({ retentionDays: days });
+    });
+  }
+
   if (chkDataCapEnabled) {
     chkDataCapEnabled.addEventListener("change", (e) => {
       saveSettings({ dataCapEnabled: e.target.checked });
@@ -354,6 +467,8 @@
         const res = await fetch("/api/db/reset", { method: "POST" });
         if (res.ok && dbActionStatus) {
           dbActionStatus.textContent = "All historical traffic counters have been reset.";
+          state.historyReport = null;
+          state.lastHistFetchAt = 0;
         }
       } catch (e) {
         console.error("Failed to reset DB:", e);
@@ -390,6 +505,7 @@
               ? `Error: ${data.error}`
               : `Completed at ${new Date().toLocaleTimeString()} via ${data.serverLabel || "Cloudflare Anycast"}`;
           }
+          fetchSpeedTestHistory();
         }
       } catch (e) {
         if (stStatusText) stStatusText.textContent = "Speed test request failed.";
@@ -397,6 +513,116 @@
         btnRunSpeedTest.disabled = false;
         btnRunSpeedTest.textContent = "Run Speed Test";
       }
+    });
+  }
+
+  async function fetchSpeedTestHistory() {
+    try {
+      const res = await fetch("/api/speedtest/history");
+      if (!res.ok) return;
+      const data = await res.json();
+      state.speedTestHistory = data.history || [];
+      if (stHistCountEl) stHistCountEl.textContent = String(state.speedTestHistory.length);
+      renderSpeedTestHistory();
+    } catch (_) {}
+  }
+
+  function renderSpeedTestHistory() {
+    if (!speedTestHistoryBody) return;
+    const rows = state.speedTestHistory || [];
+    if (rows.length === 0) {
+      speedTestHistoryBody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:14px;">No speed tests recorded yet.</td></tr>`;
+      drawSpeedTestTrend([]);
+      return;
+    }
+    speedTestHistoryBody.innerHTML = rows
+      .map((r) => {
+        const dt = r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : "—";
+        const g = r.bufferbloatGrade || "—";
+        let gCls = "";
+        if (g === "A+" || g === "A") gCls = "grade-good";
+        else if (g === "B") gCls = "grade-warn";
+        else if (g === "C" || g === "D") gCls = "grade-bad";
+        return `
+        <tr>
+          <td>${escapeHtml(dt)}</td>
+          <td class="num" style="color:var(--rx-color)">${(r.downloadMbps || 0).toFixed(1)} Mbps</td>
+          <td class="num" style="color:var(--tx-color)">${(r.uploadMbps || 0).toFixed(1)} Mbps</td>
+          <td class="num">${(r.unloadedPingMs || 0).toFixed(1)} ms</td>
+          <td class="num">${(r.loadedPingMs || 0).toFixed(1)} ms</td>
+          <td class="num">${(r.jitterMs || 0).toFixed(1)} ms</td>
+          <td><span class="st-grade-badge ${gCls}">${escapeHtml(g)}</span></td>
+        </tr>
+      `;
+      })
+      .join("");
+    drawSpeedTestTrend([...rows].reverse());
+  }
+
+  function drawSpeedTestTrend(chronological) {
+    if (!speedTestTrendCanvas || (speedTestHistoryPanel && speedTestHistoryPanel.classList.contains("hidden"))) {
+      return;
+    }
+    const rect = speedTestTrendCanvas.parentElement.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(rect.width - 8, 240);
+    const height = Math.max(rect.height - 8, 72);
+    if (speedTestTrendCanvas.width !== width * dpr || speedTestTrendCanvas.height !== height * dpr) {
+      speedTestTrendCanvas.width = width * dpr;
+      speedTestTrendCanvas.height = height * dpr;
+    }
+    const ctx = speedTestTrendCanvas.getContext("2d");
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+    if (!chronological || chronological.length < 2) {
+      ctx.fillStyle = getComputedStyle(htmlEl).getPropertyValue("--text-muted").trim();
+      ctx.font = "11px Segoe UI, sans-serif";
+      ctx.fillText("Run at least 2 speed tests to visualize download/upload trend.", 10, height / 2 + 4);
+      ctx.restore();
+      return;
+    }
+    const rxColor = getComputedStyle(htmlEl).getPropertyValue("--rx-color").trim();
+    const txColor = getComputedStyle(htmlEl).getPropertyValue("--tx-color").trim();
+    let maxMbps = 10;
+    for (const r of chronological) {
+      if (r.downloadMbps > maxMbps) maxMbps = r.downloadMbps;
+      if (r.uploadMbps > maxMbps) maxMbps = r.uploadMbps;
+    }
+    maxMbps *= 1.15;
+    const stepX = (width - 16) / (chronological.length - 1);
+    function plot(key, col) {
+      ctx.beginPath();
+      chronological.forEach((pt, idx) => {
+        const x = 8 + idx * stepX;
+        const y = height - 8 - ((pt[key] || 0) / maxMbps) * (height - 16);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    plot("uploadMbps", txColor);
+    plot("downloadMbps", rxColor);
+    ctx.restore();
+  }
+
+  if (btnSpeedTestHistory) {
+    btnSpeedTestHistory.addEventListener("click", () => {
+      if (!speedTestHistoryPanel) return;
+      speedTestHistoryPanel.classList.toggle("hidden");
+      if (!speedTestHistoryPanel.classList.contains("hidden")) {
+        fetchSpeedTestHistory();
+      }
+    });
+  }
+
+  if (btnClearSpeedHistory) {
+    btnClearSpeedHistory.addEventListener("click", async () => {
+      if (!confirm("Clear saved speed test history?")) return;
+      await fetch("/api/speedtest/history", { method: "DELETE" });
+      fetchSpeedTestHistory();
     });
   }
 
@@ -539,7 +765,7 @@
       selected = ifaces.find((x) => x.id === state.selectedIface) || null;
     }
 
-    // Connectivity / Latency probes (1.1.1.1 & 8.8.8.8)
+    // Connectivity / Latency probes (Gateway, 1.1.1.1, 8.8.8.8, + custom targets)
     if (rtPingBadgesEl) {
       const probes = payload.diagnostics?.targets || payload.diagnostics?.probes || [];
       if (probes.length === 0) {
@@ -549,15 +775,18 @@
           .map((p) => {
             const addr = p.address || (p.target ? p.target.replace(":53", "") : "");
             const name = p.name || p.target || addr;
+            const methodLabel = p.method ? ` (${p.method})` : "";
+            const label = p.name === "Default Gateway" ? "GW" : addr;
+            const spark = buildPingSparkSVG(p.history || []);
             if (!p.online) {
-              return `<span class="ping-badge bad" title="${escapeHtml(name)} (${escapeHtml(addr)}) Offline">${escapeHtml(addr)} Offline</span>`;
+              return `<span class="ping-badge bad" title="${escapeHtml(name)} (${escapeHtml(addr)})${methodLabel} Offline">${escapeHtml(label)} Offline${spark}</span>`;
             }
             const ms = p.latencyMs ? Number(p.latencyMs).toFixed(0) : "0";
             let cls = "good";
             if (p.latencyMs > 120 || p.lossPct > 10) cls = "bad";
             else if (p.latencyMs > 55 || p.lossPct > 0) cls = "warn";
             const lossTxt = p.lossPct > 0 ? ` (${p.lossPct.toFixed(0)}% loss)` : "";
-            return `<span class="ping-badge ${cls}" title="${escapeHtml(name)}: ${ms} ms${lossTxt}">${escapeHtml(addr)}: ${ms}ms${lossTxt}</span>`;
+            return `<span class="ping-badge ${cls}" title="${escapeHtml(name)} (${escapeHtml(addr)})${methodLabel}: ${ms} ms${lossTxt}">${escapeHtml(label)}: ${ms}ms${lossTxt}${spark}</span>`;
           })
           .join("");
       }
@@ -610,6 +839,27 @@
 
       drawTaskManagerGraph(hist);
     }
+  }
+
+  function buildPingSparkSVG(history) {
+    if (!Array.isArray(history) || history.length < 2) return "";
+    const recent = history.slice(-20);
+    const valid = recent.filter((v) => v > 0);
+    if (valid.length === 0) return "";
+    const maxV = Math.max(...valid, 20);
+    const w = 28;
+    const h = 12;
+    const step = w / Math.max(recent.length - 1, 1);
+    const pts = [];
+    recent.forEach((v, idx) => {
+      if (v > 0) {
+        const x = (idx * step).toFixed(1);
+        const y = (h - 2 - (v / maxV) * (h - 4)).toFixed(1);
+        pts.push(`${x},${y}`);
+      }
+    });
+    if (pts.length < 2) return "";
+    return `<svg class="ping-spark" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline fill="none" stroke="currentColor" stroke-width="1.3" points="${pts.join(" ")}"/></svg>`;
   }
 
   // Known Port / Service Resolver
@@ -670,11 +920,28 @@
       state.connFilter.subview = btn.dataset.subview;
       connSubTabBtns.forEach((b) => b.classList.toggle("active", b === btn));
       const isProc = state.connFilter.subview === "processes";
-      connSocketsTable.classList.toggle("hidden", isProc);
+      const isFw = state.connFilter.subview === "firewall";
+      connSocketsTable.classList.toggle("hidden", isProc || isFw);
       connProcessesTable.classList.toggle("hidden", !isProc);
-      renderConnectionsTable();
+      if (connFirewallTable) connFirewallTable.classList.toggle("hidden", !isFw);
+      if (connStateFilterEl) connStateFilterEl.classList.toggle("hidden", isFw);
+      if (connIncludeUdpWrapEl) connIncludeUdpWrapEl.classList.toggle("hidden", isFw);
+      if (connBlockedOnlyWrapEl) connBlockedOnlyWrapEl.classList.toggle("hidden", !isFw);
+      if (isFw) {
+        fetchKnownApps();
+      } else {
+        renderConnectionsTable();
+        fetchConnections();
+      }
     });
   });
+
+  if (chkBlockedOnly) {
+    chkBlockedOnly.addEventListener("change", () => {
+      state.connFilter.blockedOnly = chkBlockedOnly.checked;
+      renderFirewallTable();
+    });
+  }
 
   connStateBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -692,11 +959,108 @@
 
   connSearchInput.addEventListener("input", () => {
     state.connFilter.search = connSearchInput.value.trim().toLowerCase();
-    renderConnectionsTable();
+    if (state.connFilter.subview === "firewall") {
+      renderFirewallTable();
+    } else {
+      renderConnectionsTable();
+    }
   });
 
+  async function fetchKnownApps() {
+    try {
+      const res = await fetch("/api/apps");
+      if (!res.ok) return;
+      const data = await res.json();
+      state.knownApps = data.apps || [];
+      renderFirewallTable();
+    } catch (e) {
+      console.error("Failed to fetch known apps:", e);
+    }
+  }
+
+  function renderFirewallTable() {
+    if (!connFirewallTableBody) return;
+    let apps = state.knownApps || [];
+    const q = state.connFilter.search;
+    if (state.connFilter.blockedOnly) {
+      apps = apps.filter((a) => a.blocked);
+    }
+    if (q) {
+      apps = apps.filter(
+        (a) =>
+          (a.processName && a.processName.toLowerCase().includes(q)) ||
+          (a.exePath && a.exePath.toLowerCase().includes(q))
+      );
+    }
+    if (apps.length === 0) {
+      connFirewallTableBody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:18px;">No tracked applications match the current filter.</td></tr>`;
+      return;
+    }
+    connFirewallTableBody.innerHTML = apps
+      .map((a) => {
+        const initial = (a.processName || "?").charAt(0).toUpperCase();
+        const lastSeenStr = a.lastSeen ? new Date(a.lastSeen * 1000).toLocaleString() : "—";
+        const statusBadge = a.blocked
+          ? `<span class="fw-badge" style="margin-left:0">BLOCKED</span>`
+          : `<span class="fw-status-allowed">ALLOWED</span>`;
+        const btnLabel = a.blocked ? "Unblock FW" : "Block FW";
+        const btnCls = a.blocked ? "tbl-btn active-block" : "tbl-btn";
+        return `
+        <tr>
+          <td>
+            <div class="proc-cell">
+              <span class="proc-badge">${escapeHtml(initial)}</span>
+              <strong>${escapeHtml(a.processName)}</strong>
+            </div>
+          </td>
+          <td><code style="font-size:11px;color:var(--text-muted)">${escapeHtml(a.exePath || "—")}</code></td>
+          <td style="font-size:11.5px;color:var(--text-secondary)">${escapeHtml(lastSeenStr)}</td>
+          <td class="num" style="color:var(--rx-color)">${formatBytes(a.rxBytes || 0)}</td>
+          <td class="num" style="color:var(--tx-color)">${formatBytes(a.txBytes || 0)}</td>
+          <td class="num"><strong>${formatBytes(a.totalBytes || 0)}</strong></td>
+          <td>${statusBadge}</td>
+          <td class="num">
+            <button class="${btnCls}" data-allapp-proc="${escapeHtml(a.processName)}" data-allapp-exe="${escapeHtml(a.exePath || "")}" data-allapp-blocked="${a.blocked ? "1" : "0"}">${btnLabel}</button>
+          </td>
+        </tr>
+      `;
+      })
+      .join("");
+
+    connFirewallTableBody.querySelectorAll("button[data-allapp-proc]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const processName = btn.dataset.allappProc;
+        const exePath = btn.dataset.allappExe;
+        const currentlyBlocked = btn.dataset.allappBlocked === "1";
+        btn.disabled = true;
+        try {
+          const res = await fetch("/api/firewall/block", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ processName, exePath, blocked: !currentlyBlocked }),
+          });
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            alert(errData.error || "Failed to update Windows Firewall rule.");
+          }
+          await fetchKnownApps();
+          fetchConnections();
+        } catch (_) {
+          alert("Failed to update firewall rule.");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+  }
+
   async function fetchConnections() {
-    if (state.activeTab !== "realtime") return;
+    if (state.activeTab !== "realtime" || state.connFilter.subview === "firewall") return;
+    // Skip background DOM replacement while the user is actively interacting with a table action button
+    const activeEl = document.activeElement;
+    if (activeEl && activeEl.closest && (activeEl.closest("#connSocketsTable") || activeEl.closest("#connProcessesTable"))) {
+      return;
+    }
 
     const params = new URLSearchParams();
     if (state.connFilter.includeUDP) {
@@ -1263,10 +1627,19 @@
         if (qs.over100) quotaBarFill.classList.add("danger");
         else if (qs.over80) quotaBarFill.classList.add("warn");
       }
+      if (quotaProjectionText) {
+        const projStr = formatBytes(qs.projectedTotalBytes || 0);
+        const avgStr = formatBytes(qs.dailyAvgBytes || 0);
+        const budgetStr = qs.over100 ? "Cap exceeded" : `${formatBytes(qs.dailyBudgetBytes || 0)}/day budget left`;
+        const statusTxt = qs.projectedOverCap ? "Projected to exceed cap" : "On track within cap";
+        quotaProjectionText.textContent = `Day ${qs.daysElapsed || 1}/${qs.totalCycleDays || 30} • Daily avg: ${avgStr}/day • Projected cycle end: ${projStr} (${statusTxt}) • ${budgetStr}`;
+        quotaProjectionText.classList.toggle("over", !!qs.projectedOverCap || !!qs.over100);
+      }
     } catch (_) {}
   }
 
   async function fetchHistoryReport() {
+    state.lastHistFetchAt = Date.now();
     const params = buildHistoryQueryParams();
     fetchQuotaStatus();
 
@@ -1624,7 +1997,8 @@
 
     ws.onopen = () => {
       dot.classList.add("online");
-      txt.textContent = "Live (1Hz)";
+      const rate = Number(state.settings.refreshRateMs || 1000);
+      txt.textContent = rate === 1000 ? "Live (1s)" : `Live (${rate / 1000}s)`;
       if (state.activeTab === "settings") {
         fetchServiceStatus();
       }
@@ -1637,13 +2011,28 @@
         if (payload.source) {
           updateDataSourceBadge(payload.source);
         }
-        renderSidebarAdapters(payload);
+        const nowMs = Date.now();
+        const uiCadence = Math.max(1000, Number(state.settings.refreshRateMs) || 1000);
+
         if (state.activeTab === "realtime") {
-          renderRealtimeView();
-          fetchConnections();
+          if (nowMs - state.lastRtRenderAt >= uiCadence - 150) {
+            state.lastRtRenderAt = nowMs;
+            renderSidebarAdapters(payload);
+            renderRealtimeView();
+          }
+          const connCadence = Math.max(2000, uiCadence);
+          if (nowMs - state.lastConnFetchAt >= connCadence) {
+            state.lastConnFetchAt = nowMs;
+            fetchConnections();
+          }
         } else if (state.activeTab === "history") {
-          fetchHistoryReport();
+          renderSidebarAdapters(payload);
+          if (nowMs - state.lastHistFetchAt >= 15000) {
+            state.lastHistFetchAt = nowMs;
+            fetchHistoryReport();
+          }
         } else if (state.activeTab === "settings") {
+          renderSidebarAdapters(payload);
           fetchServiceStatus();
         }
       } catch (e) {
@@ -1736,6 +2125,7 @@
     connectWebSocket();
     fetchServiceStatus();
     fetchConnections();
+    fetchSpeedTestHistory();
     if (state.miniMode) {
       setTimeout(() => renderRealtimeView(), 80);
     }

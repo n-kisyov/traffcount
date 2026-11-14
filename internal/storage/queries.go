@@ -2,6 +2,8 @@ package storage
 
 import (
 	"fmt"
+	"math"
+	"os"
 	"sort"
 	"time"
 )
@@ -451,21 +453,28 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 
 // QuotaStatus represents current billing-cycle data usage against a user-configured cap.
 type QuotaStatus struct {
-	Enabled       bool    `json:"enabled"`
-	IfaceID       string  `json:"ifaceId"`
-	BillingDay    int     `json:"billingDay"`
-	CycleStart    int64   `json:"cycleStart"`
-	CycleLabel    string  `json:"cycleLabel"`
-	CapBytes      uint64  `json:"capBytes"`
-	CapGB         float64 `json:"capGB"`
-	CapGb         float64 `json:"capGb"`
-	UsedRxBytes   uint64  `json:"usedRxBytes"`
-	UsedTxBytes   uint64  `json:"usedTxBytes"`
-	UsedTotal     uint64  `json:"usedTotal"`
-	UsedBytes     uint64  `json:"usedBytes"`
-	UsedPct       float64 `json:"usedPct"`
-	Over80        bool    `json:"over80"`
-	Over100       bool    `json:"over100"`
+	Enabled             bool    `json:"enabled"`
+	IfaceID             string  `json:"ifaceId"`
+	BillingDay          int     `json:"billingDay"`
+	CycleStart          int64   `json:"cycleStart"`
+	CycleLabel          string  `json:"cycleLabel"`
+	CapBytes            uint64  `json:"capBytes"`
+	CapGB               float64 `json:"capGB"`
+	CapGb               float64 `json:"capGb"`
+	UsedRxBytes         uint64  `json:"usedRxBytes"`
+	UsedTxBytes         uint64  `json:"usedTxBytes"`
+	UsedTotal           uint64  `json:"usedTotal"`
+	UsedBytes           uint64  `json:"usedBytes"`
+	UsedPct             float64 `json:"usedPct"`
+	Over80              bool    `json:"over80"`
+	Over100             bool    `json:"over100"`
+	DaysElapsed         int     `json:"daysElapsed"`
+	DaysRemaining       int     `json:"daysRemaining"`
+	TotalCycleDays      int     `json:"totalCycleDays"`
+	DailyAvgBytes       uint64  `json:"dailyAvgBytes"`
+	ProjectedTotalBytes uint64  `json:"projectedTotalBytes"`
+	DailyBudgetBytes    uint64  `json:"dailyBudgetBytes"`
+	ProjectedOverCap    bool    `json:"projectedOverCap"`
 }
 
 // QueryQuotaStatus computes usage since the current billing cycle start day.
@@ -489,17 +498,39 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 		prev := now.AddDate(0, -1, 0)
 		cycleStart = time.Date(prev.Year(), prev.Month(), bDay, 0, 0, 0, 0, loc)
 	}
+	nextCycleStart := cycleStart.AddDate(0, 1, 0)
+	totalCycleDays := int(math.Round(nextCycleStart.Sub(cycleStart).Hours() / 24.0))
+	if totalCycleDays < 28 {
+		totalCycleDays = 30
+	}
+
+	elapsedHours := now.Sub(cycleStart).Hours()
+	if elapsedHours < 0 {
+		elapsedHours = 0
+	}
+	daysElapsed := int(elapsedHours/24.0) + 1
+	if daysElapsed > totalCycleDays {
+		daysElapsed = totalCycleDays
+	}
+	remHours := nextCycleStart.Sub(now).Hours()
+	if remHours < 0 {
+		remHours = 0
+	}
+	daysRemaining := int(math.Ceil(remHours / 24.0))
 
 	capBytes := uint64(cfg.DataCapGB * 1024 * 1024 * 1024)
 	qs := QuotaStatus{
-		Enabled:    cfg.DataCapEnabled,
-		IfaceID:    cfg.DataCapIface,
-		BillingDay: bDay,
-		CycleStart: cycleStart.Unix(),
-		CycleLabel: fmt.Sprintf("Since %s", cycleStart.Format("Jan 02")),
-		CapBytes:   capBytes,
-		CapGB:      cfg.DataCapGB,
-		CapGb:      cfg.DataCapGB,
+		Enabled:        cfg.DataCapEnabled,
+		IfaceID:        cfg.DataCapIface,
+		BillingDay:     bDay,
+		CycleStart:     cycleStart.Unix(),
+		CycleLabel:     fmt.Sprintf("Since %s", cycleStart.Format("Jan 02")),
+		CapBytes:       capBytes,
+		CapGB:          cfg.DataCapGB,
+		CapGb:          cfg.DataCapGB,
+		DaysElapsed:    daysElapsed,
+		DaysRemaining:  daysRemaining,
+		TotalCycleDays: totalCycleDays,
 	}
 
 	s.mu.RLock()
@@ -528,6 +559,15 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 		qs.UsedPct = (float64(qs.UsedTotal) / float64(capBytes)) * 100.0
 		qs.Over80 = qs.UsedPct >= 80.0
 		qs.Over100 = qs.UsedPct >= 100.0
+	}
+
+	effectiveDays := math.Max(elapsedHours/24.0, 1.0)
+	dailyAvg := float64(qs.UsedTotal) / effectiveDays
+	qs.DailyAvgBytes = uint64(dailyAvg)
+	qs.ProjectedTotalBytes = uint64(dailyAvg * float64(totalCycleDays))
+	qs.ProjectedOverCap = capBytes > 0 && qs.ProjectedTotalBytes > capBytes
+	if capBytes > qs.UsedTotal && remHours > 0 {
+		qs.DailyBudgetBytes = uint64(float64(capBytes-qs.UsedTotal) / math.Max(remHours/24.0, 1.0))
 	}
 	return qs, nil
 }
@@ -583,6 +623,131 @@ func (s *Store) ResetTrafficHistory() error {
 		DELETE FROM traffic_hourly;
 		DELETE FROM process_traffic_hourly;
 	`)
+	return err
+}
+
+// KnownAppRecord represents a tracked application and its cumulative historical volume and firewall status.
+type KnownAppRecord struct {
+	ProcessName string `json:"processName"`
+	ExePath     string `json:"exePath"`
+	FirstSeen   int64  `json:"firstSeen"`
+	LastSeen    int64  `json:"lastSeen"`
+	Blocked     bool   `json:"blocked"`
+	RxBytes     uint64 `json:"rxBytes"`
+	TxBytes     uint64 `json:"txBytes"`
+	TotalBytes  uint64 `json:"totalBytes"`
+}
+
+// ListKnownApps returns all recorded applications ordered by blocked status then total traffic.
+func (s *Store) ListKnownApps() ([]KnownAppRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT
+			k.process_name,
+			k.exe_path,
+			k.first_seen,
+			k.last_seen,
+			k.blocked,
+			COALESCE(SUM(p.rx_bytes), 0) AS rx,
+			COALESCE(SUM(p.tx_bytes), 0) AS tx
+		FROM known_apps k
+		LEFT JOIN process_traffic_hourly p ON p.process_name = k.process_name
+		GROUP BY k.process_name
+		ORDER BY k.blocked DESC, (COALESCE(SUM(p.rx_bytes), 0) + COALESCE(SUM(p.tx_bytes), 0)) DESC, k.last_seen DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []KnownAppRecord
+	for rows.Next() {
+		var item KnownAppRecord
+		var blockedInt int
+		if err := rows.Scan(&item.ProcessName, &item.ExePath, &item.FirstSeen, &item.LastSeen, &blockedInt, &item.RxBytes, &item.TxBytes); err != nil {
+			return nil, err
+		}
+		item.Blocked = blockedInt != 0
+		item.TotalBytes = item.RxBytes + item.TxBytes
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// SpeedTestRecord holds a persisted speed test & bufferbloat measurement.
+type SpeedTestRecord struct {
+	ID               int64   `json:"id"`
+	Timestamp        int64   `json:"timestamp"`
+	UnloadedPingMs   float64 `json:"unloadedPingMs"`
+	JitterMs         float64 `json:"jitterMs"`
+	LoadedPingMs     float64 `json:"loadedPingMs"`
+	DownloadMbps     float64 `json:"downloadMbps"`
+	UploadMbps       float64 `json:"uploadMbps"`
+	BufferbloatGrade string  `json:"bufferbloatGrade"`
+	ServerLabel      string  `json:"serverLabel"`
+	Error            string  `json:"error,omitempty"`
+}
+
+// RecordSpeedTest persists a speed test result to SQLite.
+func (s *Store) RecordSpeedTest(r SpeedTestRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		INSERT INTO speed_tests (ts, unloaded_ping_ms, jitter_ms, loaded_ping_ms, download_mbps, upload_mbps, bufferbloat_grade, server_label, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.Timestamp, r.UnloadedPingMs, r.JitterMs, r.LoadedPingMs, r.DownloadMbps, r.UploadMbps, r.BufferbloatGrade, r.ServerLabel, r.Error)
+	return err
+}
+
+// ListSpeedTests returns recent speed test runs ordered newest first.
+func (s *Store) ListSpeedTests(limit int) ([]SpeedTestRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 30
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, ts, unloaded_ping_ms, jitter_ms, loaded_ping_ms, download_mbps, upload_mbps, bufferbloat_grade, server_label, error
+		FROM speed_tests
+		ORDER BY ts DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]SpeedTestRecord, 0)
+	for rows.Next() {
+		var r SpeedTestRecord
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.UnloadedPingMs, &r.JitterMs, &r.LoadedPingMs, &r.DownloadMbps, &r.UploadMbps, &r.BufferbloatGrade, &r.ServerLabel, &r.Error); err != nil {
+			return nil, err
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
+// ClearSpeedTests deletes all persisted speed test history records.
+func (s *Store) ClearSpeedTests() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM speed_tests`)
+	return err
+}
+
+// BackupTo checkpoints WAL frames and writes a consistent SQLite database snapshot to dstPath.
+func (s *Store) BackupTo(dstPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_ = os.Remove(dstPath)
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	_, err := s.db.Exec(`VACUUM INTO ?`, dstPath)
 	return err
 }
 

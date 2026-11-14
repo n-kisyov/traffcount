@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -169,6 +170,7 @@ type Options struct {
 // Controller manages the Windows 11 System Tray icon and context menu.
 type Controller struct {
 	opts           Options
+	mu             sync.Mutex
 	hwnd           windows.Handle
 	nid            notifyIconDataW
 	hIconIdle      windows.Handle
@@ -178,6 +180,7 @@ type Controller struct {
 	curIcon        windows.Handle
 	stayOnTop      bool
 	svcState       string
+	speedUnit      string
 	alerted80      bool
 	alerted100     bool
 	spikeTicks     int
@@ -193,6 +196,7 @@ func NewController(opts Options) *Controller {
 		opts:      opts,
 		stayOnTop: top,
 		svcState:  "Checking...",
+		speedUnit: "bits",
 	}
 	activeController = c
 	return c
@@ -200,7 +204,9 @@ func NewController(opts Options) *Controller {
 
 // SyncStayOnTop updates the tray checkmark and applies the topmost style in the interactive user session.
 func (c *Controller) SyncStayOnTop(topmost bool) {
+	c.mu.Lock()
 	c.stayOnTop = topmost
+	c.mu.Unlock()
 	if c.opts.WinMgr != nil {
 		c.opts.WinMgr.SetAlwaysOnTop(topmost)
 	}
@@ -389,15 +395,21 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_UPDATE_TIP:
 		if c != nil {
+			c.mu.Lock()
 			c.nid.UFlags = NIF_TIP | NIF_ICON
-			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
+			nidSnap := c.nid
+			c.mu.Unlock()
+			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&nidSnap)))
 		}
 		return 0
 
 	case WM_SHOW_BALLOON:
 		if c != nil {
+			c.mu.Lock()
 			c.nid.UFlags = NIF_INFO
-			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&c.nid)))
+			nidSnap := c.nid
+			c.mu.Unlock()
+			procShellNotifyIconW.Call(NIM_MODIFY, uintptr(unsafe.Pointer(&nidSnap)))
 		}
 		return 0
 
@@ -417,7 +429,9 @@ func trayWndProc(hwnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
 	case WM_SET_TOPMOST:
 		top := wParam != 0
 		if c != nil {
+			c.mu.Lock()
 			c.stayOnTop = top
+			c.mu.Unlock()
 			if c.opts.WinMgr != nil {
 				c.opts.WinMgr.SetAlwaysOnTop(top)
 			}
@@ -462,11 +476,16 @@ func (c *Controller) showContextMenu(hwnd windows.Handle) {
 	}
 	defer procDestroyMenu.Call(hMenu)
 
+	c.mu.Lock()
+	stayOnTop := c.stayOnTop
+	svcState := c.svcState
+	c.mu.Unlock()
+
 	appendMenuItem(hMenu, MF_STRING, cmdOpenDashboard, "Open TraffCount Dashboard")
 	appendMenuItem(hMenu, MF_SEPARATOR, 0, "")
 
 	topFlags := uint32(MF_STRING)
-	if c.stayOnTop {
+	if stayOnTop {
 		topFlags |= MF_CHECKED
 	}
 	appendMenuItem(hMenu, topFlags, cmdStayOnTop, "Stay on Top (Always on Top)")
@@ -478,10 +497,21 @@ func (c *Controller) showContextMenu(hwnd windows.Handle) {
 	appendMenuItem(hMenu, startupFlags, cmdStartupToggle, "Start on System Boot (Minimized to Tray)")
 
 	appendMenuItem(hMenu, MF_SEPARATOR, 0, "")
-	appendMenuItem(hMenu, MF_STRING|MF_GRAYED, 0, fmt.Sprintf("Windows Service: %s", c.svcState))
-	appendMenuItem(hMenu, MF_STRING, cmdSvcInstall, "Install & Start Service (Admin)")
-	appendMenuItem(hMenu, MF_STRING, cmdSvcStop, "Stop Service (Admin)")
-	appendMenuItem(hMenu, MF_STRING, cmdSvcUninstall, "Uninstall Service (Admin)")
+	appendMenuItem(hMenu, MF_STRING|MF_GRAYED, 0, fmt.Sprintf("Windows Service: %s", svcState))
+	if svcState == "Not Installed" {
+		appendMenuItem(hMenu, MF_STRING, cmdSvcInstall, "Install & Start Service (Admin)")
+	} else {
+		startFlags := uint32(MF_STRING)
+		stopFlags := uint32(MF_STRING)
+		if svcState == "Running" {
+			startFlags |= MF_GRAYED
+		} else {
+			stopFlags |= MF_GRAYED
+		}
+		appendMenuItem(hMenu, startFlags, cmdSvcStart, "Start Service (Admin)")
+		appendMenuItem(hMenu, stopFlags, cmdSvcStop, "Stop Service (Admin)")
+		appendMenuItem(hMenu, MF_STRING, cmdSvcUninstall, "Uninstall Service (Admin)")
+	}
 
 	appendMenuItem(hMenu, MF_SEPARATOR, 0, "")
 	appendMenuItem(hMenu, MF_STRING, cmdQuit, "Quit TraffCount")
@@ -513,8 +543,10 @@ func (c *Controller) handleCommand(cmdID uint32) {
 			go c.opts.WinMgr.OpenDashboard()
 		}
 	case cmdStayOnTop:
+		c.mu.Lock()
 		next := !c.stayOnTop
 		c.stayOnTop = next
+		c.mu.Unlock()
 		if c.opts.WinMgr != nil {
 			c.opts.WinMgr.SetAlwaysOnTop(next)
 		}
@@ -575,12 +607,14 @@ func (c *Controller) ShowBalloonNotification(title, message string, isWarning bo
 		return
 	}
 	uTitle, _ := syscall.UTF16FromString(title)
+	uMsg, _ := syscall.UTF16FromString(message)
+
+	c.mu.Lock()
 	for i := range c.nid.SzInfoTitle {
 		c.nid.SzInfoTitle[i] = 0
 	}
 	copy(c.nid.SzInfoTitle[:len(c.nid.SzInfoTitle)-1], uTitle)
 
-	uMsg, _ := syscall.UTF16FromString(message)
 	for i := range c.nid.SzInfo {
 		c.nid.SzInfo[i] = 0
 	}
@@ -591,7 +625,10 @@ func (c *Controller) ShowBalloonNotification(title, message string, isWarning bo
 	} else {
 		c.nid.DwInfoFlags = NIIF_INFO
 	}
-	procPostMessageW.Call(uintptr(c.hwnd), WM_SHOW_BALLOON, 0, 0)
+	hwnd := c.hwnd
+	c.mu.Unlock()
+
+	procPostMessageW.Call(uintptr(hwnd), WM_SHOW_BALLOON, 0, 0)
 }
 
 func setTipText(nid *notifyIconDataW, text string) {
@@ -655,7 +692,10 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 			return
 		case <-ticker.C:
 			st := service.QueryStatus()
+			c.mu.Lock()
 			c.svcState = st.StateText
+			curTop := c.stayOnTop
+			c.mu.Unlock()
 
 			// Sync settings (including AlwaysOnTop toggled from the Web UI when served by Windows Service)
 			// and continuously enforce HWND_TOPMOST and capture live window bounds on the interactive desktop window.
@@ -672,16 +712,23 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 					AlwaysOnTop    bool    `json:"alwaysOnTop"`
 					StartOnBoot    bool    `json:"startOnBoot"`
 					SpikeAlertMbps float64 `json:"spikeAlertMbps"`
+					SpeedUnit      string  `json:"speedUnit"`
 				}
 				if json.NewDecoder(sResp.Body).Decode(&cfg) == nil {
 					spikeAlertMbps = cfg.SpikeAlertMbps
-					if c.stayOnTop != cfg.AlwaysOnTop {
-						c.stayOnTop = cfg.AlwaysOnTop
+					c.mu.Lock()
+					if cfg.SpeedUnit == "bytes" || cfg.SpeedUnit == "bits" {
+						c.speedUnit = cfg.SpeedUnit
+					}
+					topChanged := c.stayOnTop != cfg.AlwaysOnTop
+					c.stayOnTop = cfg.AlwaysOnTop
+					c.mu.Unlock()
+					if topChanged {
 						if c.opts.WinMgr != nil {
 							c.opts.WinMgr.SetAlwaysOnTop(cfg.AlwaysOnTop)
 						}
 					} else if c.opts.WinMgr != nil {
-						c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
+						c.opts.WinMgr.EnforceAlwaysOnTop(cfg.AlwaysOnTop)
 					}
 					if IsStartupEnabled() != cfg.StartOnBoot {
 						_ = SetStartupEnabled(cfg.StartOnBoot)
@@ -689,7 +736,7 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 				}
 				sResp.Body.Close()
 			} else if c.opts.WinMgr != nil {
-				c.opts.WinMgr.EnforceAlwaysOnTop(c.stayOnTop)
+				c.opts.WinMgr.EnforceAlwaysOnTop(curTop)
 			}
 
 			// Check Monthly Data Cap alerts
@@ -746,11 +793,17 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 			if err == nil && resp.StatusCode == http.StatusOK {
 				var snap collector.RealtimePayload
 				if json.NewDecoder(resp.Body).Decode(&snap) == nil {
-					tip := fmt.Sprintf("TraffCount\nDown: %s\nUp: %s",
-						formatSpeedBits(snap.TotalRxBps),
-						formatSpeedBits(snap.TotalTxBps),
-					)
-					setTipText(&c.nid, tip)
+					c.mu.Lock()
+					unit := c.speedUnit
+					c.mu.Unlock()
+
+					downStr := formatSpeedBits(snap.TotalRxBps)
+					upStr := formatSpeedBits(snap.TotalTxBps)
+					if unit == "bytes" {
+						downStr = formatSpeedBytes(snap.TotalRxBps)
+						upStr = formatSpeedBytes(snap.TotalTxBps)
+					}
+					tip := fmt.Sprintf("TraffCount\nDown: %s\nUp: %s", downStr, upStr)
 
 					// Bandwidth spike anomaly check
 					if spikeAlertMbps > 0 {
@@ -775,19 +828,26 @@ func (c *Controller) statusUpdater(ctx context.Context) {
 					// Dynamic activity icon state (> 1 KB/s threshold)
 					rxActive := snap.TotalRxBps > 1024
 					txActive := snap.TotalTxBps > 1024
+					var iconHandle windows.Handle
 					switch {
 					case rxActive && txActive:
-						c.nid.HIcon = c.hIconBoth
+						iconHandle = c.hIconBoth
 					case rxActive:
-						c.nid.HIcon = c.hIconRx
+						iconHandle = c.hIconRx
 					case txActive:
-						c.nid.HIcon = c.hIconTx
+						iconHandle = c.hIconTx
 					default:
-						c.nid.HIcon = c.hIconIdle
+						iconHandle = c.hIconIdle
 					}
 
-					if c.hwnd != 0 {
-						procPostMessageW.Call(uintptr(c.hwnd), WM_UPDATE_TIP, 0, 0)
+					c.mu.Lock()
+					setTipText(&c.nid, tip)
+					c.nid.HIcon = iconHandle
+					hwnd := c.hwnd
+					c.mu.Unlock()
+
+					if hwnd != 0 {
+						procPostMessageW.Call(uintptr(hwnd), WM_UPDATE_TIP, 0, 0)
 					}
 				}
 				resp.Body.Close()
@@ -831,6 +891,20 @@ func (c *Controller) postBoundsToServer(b any) {
 	resp, err := client.Post(c.opts.DashboardURL+"/api/window/bounds", "application/json", bytes.NewReader(body))
 	if err == nil {
 		resp.Body.Close()
+	}
+}
+
+func formatSpeedBytes(bytesPerSec uint64) string {
+	val := float64(bytesPerSec)
+	switch {
+	case val >= 1024*1024*1024:
+		return fmt.Sprintf("%.2f GB/s", val/(1024*1024*1024))
+	case val >= 1024*1024:
+		return fmt.Sprintf("%.1f MB/s", val/(1024*1024))
+	case val >= 1024:
+		return fmt.Sprintf("%.0f KB/s", val/1024)
+	default:
+		return fmt.Sprintf("%.0f B/s", val)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -491,6 +492,19 @@ func GetActiveConnections(filterIP string, includeUDP bool) ConnectionsSnapshot 
 	return snap
 }
 
+// ResetProcessBuffers clears pending per-process deltas and resets in-memory session process totals.
+func ResetProcessBuffers() {
+	procTrackMu.Lock()
+	defer procTrackMu.Unlock()
+	pendingProcDeltas = make(map[string]*storage.ProcessTrafficDelta)
+	for _, tr := range procTrack {
+		tr.cumRx = 0
+		tr.cumTx = 0
+		tr.rxBps = 0
+		tr.txBps = 0
+	}
+}
+
 // TakePendingProcessDeltas drains accumulated per-application traffic deltas for SQLite persistence.
 func TakePendingProcessDeltas() []storage.ProcessTrafficDelta {
 	procTrackMu.Lock()
@@ -613,15 +627,20 @@ func queryTCPEStatsV4(localIP string, localPort uint32, remoteIP string, remoteP
 	return queryEstats(uintptr(unsafe.Pointer(&row)), procGetPerTcpConnectionEStat, procSetPerTcpConnectionEStat)
 }
 
-func parseIPv6NoZone(s string) net.IP {
+func parseIPv6AndScope(s string) (net.IP, uint32) {
+	var scope uint32
 	if idx := strings.IndexByte(s, '%'); idx >= 0 {
+		zoneStr := s[idx+1:]
 		s = s[:idx]
+		if v, err := strconv.ParseUint(zoneStr, 10, 32); err == nil {
+			scope = uint32(v)
+		}
 	}
 	ip := net.ParseIP(s)
 	if ip == nil {
-		return nil
+		return nil, 0
 	}
-	return ip.To16()
+	return ip.To16(), scope
 }
 
 func isLoopbackEndpoint(ipStr string) bool {
@@ -636,8 +655,8 @@ func isLoopbackEndpoint(ipStr string) bool {
 }
 
 func queryTCPEStatsV6(localIP string, localPort uint32, remoteIP string, remotePort uint32) (rxBytes uint64, txBytes uint64, rttMs uint32) {
-	lip := parseIPv6NoZone(localIP)
-	rip := parseIPv6NoZone(remoteIP)
+	lip, lScope := parseIPv6AndScope(localIP)
+	rip, rScope := parseIPv6AndScope(remoteIP)
 	if lip == nil || rip == nil {
 		return 0, 0, 0
 	}
@@ -645,8 +664,10 @@ func queryTCPEStatsV6(localIP string, localPort uint32, remoteIP string, remoteP
 	var row mibTcp6Row
 	row.State = 5 // MIB_TCP_STATE_ESTAB
 	copy(row.LocalAddr[:], lip)
+	row.LocalScopeId = lScope
 	row.LocalPort = htons32(uint16(localPort))
 	copy(row.RemoteAddr[:], rip)
+	row.RemoteScopeId = rScope
 	row.RemotePort = htons32(uint16(remotePort))
 
 	return queryEstats(uintptr(unsafe.Pointer(&row)), procGetPerTcp6ConnectionEStat, procSetPerTcp6ConnectionEStat)
@@ -722,12 +743,63 @@ func htons32(p uint16) uint32 {
 	return uint32((p>>8)&0xff) | uint32((p&0xff)<<8)
 }
 
-var geoHTTPClient = &http.Client{Timeout: 2500 * time.Millisecond}
+type geoLookupJob struct {
+	targetIP string
+	defHost  string
+	defCC    string
+	defGeo   string
+}
+
+var (
+	geoHTTPClient = &http.Client{Timeout: 2500 * time.Millisecond}
+	geoQueue      = make(chan geoLookupJob, 128)
+	geoWorkersOnce sync.Once
+)
+
+func ensureGeoWorkersStarted() {
+	geoWorkersOnce.Do(func() {
+		for i := 0; i < 4; i++ {
+			go func() {
+				for job := range geoQueue {
+					resolvedHost := job.defHost
+					names, err := net.LookupAddr(job.targetIP)
+					if err == nil && len(names) > 0 {
+						resolvedHost = strings.TrimSuffix(names[0], ".")
+					}
+
+					cc := job.defCC
+					geo := job.defGeo
+					if cc == "" && !isPrivateOrLocalIP(job.targetIP) {
+						if apiCC, apiOrg := queryIPWhois(job.targetIP); apiCC != "" {
+							cc = apiCC
+							if apiOrg != "" {
+								geo = apiCC + " · " + apiOrg
+							} else {
+								geo = apiCC
+							}
+						}
+					}
+
+					dnsMu.Lock()
+					dnsCache[job.targetIP] = dnsCacheEntry{
+						host:        resolvedHost,
+						countryCode: cc,
+						geoLabel:    geo,
+						expiresAt:   time.Now().Add(30 * time.Minute),
+						pending:     false,
+					}
+					dnsMu.Unlock()
+				}
+			}()
+		}
+	})
+}
 
 func lookupRemoteHostAndGeoAsync(ip string, now time.Time) (string, string, string) {
 	if ip == "" || ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" {
 		return "localhost", "LO", "Loopback"
 	}
+	ensureGeoWorkersStarted()
 	hostHint, ccHint, geoHint := classifyWellKnownIP(ip)
 
 	dnsMu.Lock()
@@ -751,41 +823,23 @@ func lookupRemoteHostAndGeoAsync(ip string, now time.Time) (string, string, stri
 		host:        hostHint,
 		countryCode: ccHint,
 		geoLabel:    geoHint,
-		expiresAt:   now.Add(10 * time.Minute),
+		expiresAt:   now.Add(5 * time.Minute),
 		pending:     true,
 	}
 	dnsMu.Unlock()
 
-	go func(targetIP, defHost, defCC, defGeo string) {
-		resolvedHost := defHost
-		names, err := net.LookupAddr(targetIP)
-		if err == nil && len(names) > 0 {
-			resolvedHost = strings.TrimSuffix(names[0], ".")
-		}
-
-		cc := defCC
-		geo := defGeo
-		if cc == "" && !isPrivateOrLocalIP(targetIP) {
-			if apiCC, apiOrg := queryIPWhois(targetIP); apiCC != "" {
-				cc = apiCC
-				if apiOrg != "" {
-					geo = apiCC + " · " + apiOrg
-				} else {
-					geo = apiCC
-				}
-			}
-		}
-
+	select {
+	case geoQueue <- geoLookupJob{targetIP: ip, defHost: hostHint, defCC: ccHint, defGeo: geoHint}:
+	default:
+		// Worker queue saturated: expire pending marker shortly so it retries later
 		dnsMu.Lock()
-		dnsCache[targetIP] = dnsCacheEntry{
-			host:        resolvedHost,
-			countryCode: cc,
-			geoLabel:    geo,
-			expiresAt:   time.Now().Add(30 * time.Minute),
-			pending:     false,
+		if cur, exists := dnsCache[ip]; exists && cur.pending {
+			cur.pending = false
+			cur.expiresAt = now.Add(15 * time.Second)
+			dnsCache[ip] = cur
 		}
 		dnsMu.Unlock()
-	}(ip, hostHint, ccHint, geoHint)
+	}
 
 	return hostHint, ccHint, geoHint
 }
@@ -829,15 +883,11 @@ func classifyWellKnownIP(ip string) (host, cc, geo string) {
 	case isPrivateOrLocalIP(ip):
 		return "Local LAN", "LAN", "Local Network"
 	case ip == "1.1.1.1" || ip == "1.0.0.1":
-		return "one.one.one.one", "US", "US · Cloudflare DNS"
+		return "one.one.one.one", "AU", "AU · Cloudflare DNS"
 	case ip == "8.8.8.8" || ip == "8.8.4.4":
 		return "dns.google", "US", "US · Google DNS"
-	case strings.HasPrefix(ip, "142.250.") || strings.HasPrefix(ip, "172.217."):
-		return "Google Edge", "US", "US · Google LLC"
-	case strings.HasPrefix(ip, "20.") || strings.HasPrefix(ip, "13.") || strings.HasPrefix(ip, "40.") || strings.HasPrefix(ip, "52."):
-		return "Microsoft Cloud", "US", "US · Microsoft Azure"
-	case strings.HasPrefix(ip, "104.16.") || strings.HasPrefix(ip, "104.18.") || strings.HasPrefix(ip, "172.64."):
-		return "Cloudflare CDN", "US", "US · Cloudflare"
+	case ip == "9.9.9.9" || ip == "149.112.112.112":
+		return "dns.quad9.net", "CH", "CH · Quad9 DNS"
 	default:
 		return "", "", ""
 	}
