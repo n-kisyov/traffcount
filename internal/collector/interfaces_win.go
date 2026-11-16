@@ -12,17 +12,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// AdapterMeta holds enriched Windows network adapter properties.
-type AdapterMeta struct {
-	Name        string
-	Description string
-	MAC         string
-	IPv4        string
-	IPv6        string
-	Gateway     string
-	LinkSpeed   uint64 // bits per second
-	IsLoopback  bool
-	IsUp        bool
+// GetSystemAdapters queries Windows GetAdaptersAddresses for rich NIC metadata.
+func GetSystemAdapters() map[string]AdapterMeta {
+	return GetWindowsAdapters()
 }
 
 // GetWindowsAdapters queries Windows GetAdaptersAddresses for rich NIC metadata.

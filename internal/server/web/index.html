@@ -19,7 +19,7 @@
         </div>
         <div class="brand-text">
           <span class="brand-title">TraffCount</span>
-          <span class="brand-subtitle">Windows 11 Network Monitor</span>
+          <span class="brand-subtitle" id="brandSubtitle">Windows 11 Network Monitor</span>
         </div>
       </div>
 
@@ -73,7 +73,7 @@
 
         <div class="top-bar-actions">
           <!-- Mini-Widget Floating Overlay Button -->
-          <button id="btnMiniWidget" class="action-pill" title="Switch to compact Always-on-Top Mini-Widget overlay">
+          <button id="btnMiniWidget" class="action-pill win-only" title="Switch to compact Always-on-Top Mini-Widget overlay">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="3" y="3" width="18" height="18" rx="2"/><rect x="12" y="12" width="7" height="7" rx="1"/>
             </svg>
@@ -81,7 +81,7 @@
           </button>
 
           <!-- Stay on Top Pin Button -->
-          <button id="btnStayOnTop" class="action-pill" title="Keep TraffCount window always on top of other windows">
+          <button id="btnStayOnTop" class="action-pill win-only" title="Keep TraffCount window always on top of other windows">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="17" x2="12" y2="22"></line>
               <path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"></path>
@@ -474,8 +474,8 @@
       <section id="tab-settings" class="tab-panel">
         <div class="settings-grid">
           <div class="settings-card">
-            <h3>Appearance &amp; Window Behavior</h3>
-            <p class="settings-desc">Customize how TraffCount looks and behaves on your Windows 11 desktop.</p>
+            <h3>Appearance &amp; Behavior</h3>
+            <p class="settings-desc" id="settingsBehaviorDesc">Customize how TraffCount looks and behaves.</p>
 
             <div class="setting-row setting-row-col">
               <div>
@@ -492,7 +492,7 @@
               </div>
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">Stay on Top (Always on Top)</div>
                 <div class="setting-hint">Keep the TraffCount window pinned above other desktop windows.</div>
@@ -503,7 +503,7 @@
               </label>
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">Start on System Boot</div>
                 <div class="setting-hint">Launch TraffCount minimized to the system tray automatically when Windows starts.</div>
@@ -514,7 +514,7 @@
               </label>
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">Start Minimized to System Tray</div>
                 <div class="setting-hint">When starting TraffCount manually, start in the system tray without opening the window.</div>
@@ -559,7 +559,7 @@
               </div>
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">Show Sparkline in Mini-Widget</div>
                 <div class="setting-hint">Include the 60-second throughput graph beneath speeds in Mini-Widget mode.</div>
@@ -572,8 +572,8 @@
           </div>
 
           <div class="settings-card">
-            <h3>Windows Background Service</h3>
-            <p class="settings-desc">
+            <h3 id="svcCardTitle">Windows Background Service</h3>
+            <p class="settings-desc" id="svcCardDesc">
               Run TraffCount's collector as an automatic Windows Service (`TraffCountService`) so traffic is counted 24/7 even before login.
             </p>
 
@@ -592,7 +592,7 @@
               <button id="btnSvcUninstall" class="btn-danger">Uninstall Service</button>
             </div>
 
-            <div class="settings-note">
+            <div class="settings-note" id="svcCliTip">
               <strong>CLI Tip:</strong> You can also manage the service from an elevated PowerShell prompt using:
               <code>traffcount.exe service install</code> or <code>traffcount.exe service status</code>
             </div>
@@ -600,7 +600,7 @@
 
           <div class="settings-card">
             <h3>Data Cap &amp; Bandwidth Alerts</h3>
-            <p class="settings-desc">
+            <p class="settings-desc" id="dataCapCardDesc">
               Configure a monthly billing-cycle data cap and sustained bandwidth spike alerts with Windows 11 system tray notifications.
             </p>
 
@@ -631,7 +631,7 @@
               <input type="number" id="inputBillingDay" class="input-control" style="width:90px" min="1" max="28" step="1" value="1" />
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">Sustained Spike Alert Threshold (Mbps)</div>
                 <div class="setting-hint">Trigger a system tray alert when throughput exceeds this rate (0 = disabled).</div>
@@ -639,7 +639,7 @@
               <input type="number" id="inputSpikeMbps" class="input-control" style="width:110px" min="0" max="100000" step="10" value="0" />
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row win-only">
               <div>
                 <div class="setting-title">New Application Network Access Alert</div>
                 <div class="setting-hint">Show a Windows 11 tray notification when a new .exe accesses the network for the first time.</div>

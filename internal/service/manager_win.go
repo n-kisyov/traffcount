@@ -41,6 +41,11 @@ func IsWindowsServiceProcess() bool {
 	return inService
 }
 
+// IsServiceProcess reports whether the current process is running as a managed background service.
+func IsServiceProcess() bool {
+	return IsWindowsServiceProcess()
+}
+
 // IsAdmin reports whether the current process has elevated administrator privileges.
 func IsAdmin() bool {
 	var sid *windows.SID

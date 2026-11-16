@@ -25,6 +25,7 @@
     miniMode: false,
     wasMaximizedBeforeMini: false,
     dataSource: "app",
+    platform: "windows",
     latestRealtime: null,
     historyFilter: {
       period: "",
@@ -316,7 +317,7 @@
         loadHistoryInterfaces();
         fetchHistoryReport();
       } else if (tab === "settings") {
-        viewTitleEl.textContent = "Settings & Windows Service";
+        viewTitleEl.textContent = state.platform === "windows" ? "Settings & Windows Service" : "Settings & Systemd Service";
         viewSubtitleEl.textContent = "Preferences & Daemon";
         fetchServiceStatus();
       }
@@ -1041,7 +1042,7 @@
           });
           if (!res.ok) {
             const errData = await res.json().catch(() => ({}));
-            alert(errData.error || "Failed to update Windows Firewall rule.");
+            alert(errData.error || "Failed to update blocking rule.");
           }
           await fetchKnownApps();
           fetchConnections();
@@ -1161,7 +1162,7 @@
             });
             if (!res.ok) {
               const errData = await res.json().catch(() => ({}));
-              alert(errData.error || "Failed to update Windows Firewall rule.");
+              alert(errData.error || "Failed to update blocking rule.");
             }
             fetchConnections();
           } catch (err) {
@@ -1699,7 +1700,9 @@
       if (byProc.length === 0) {
         const msg =
           state.dataSource === "app"
-            ? "No per-application traffic recorded for this period yet. Start TraffCountService (or run as Administrator) to allow Windows TCP EStats collection."
+            ? state.platform === "windows"
+              ? "No per-application traffic recorded for this period yet. Start TraffCountService (or run as Administrator) to allow Windows TCP EStats collection."
+              : "No per-application traffic recorded for this period yet. Open the Connections Inspector or generate TCP traffic to record per-app volume."
             : "No per-application traffic recorded for this period yet — active TCP traffic will appear here automatically.";
         historyProcTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:18px;">${msg}</td></tr>`;
       } else {
@@ -1907,6 +1910,41 @@
     });
   }
 
+  function applyPlatformMode(platform) {
+    if (!platform) return;
+    state.platform = platform;
+    const isWin = platform === "windows";
+    document.body.classList.toggle("platform-linux", !isWin);
+
+    const brandSubtitle = document.getElementById("brandSubtitle");
+    const svcCardTitle = document.getElementById("svcCardTitle");
+    const svcCardDesc = document.getElementById("svcCardDesc");
+    const btnSvcInstall = document.getElementById("btnSvcInstall");
+    const svcCliTip = document.getElementById("svcCliTip");
+    const dataCapCardDesc = document.getElementById("dataCapCardDesc");
+
+    if (!isWin) {
+      if (brandSubtitle) brandSubtitle.textContent = "Raspberry Pi / Linux Network Monitor";
+      if (svcCardTitle) svcCardTitle.textContent = "Linux Background Service (systemd)";
+      if (svcCardDesc) {
+        svcCardDesc.innerHTML =
+          "Run TraffCount's collector as an automatic systemd unit (<code>traffcount.service</code>) so traffic is counted 24/7 across reboots.";
+      }
+      if (btnSvcInstall) btnSvcInstall.textContent = "Install & Start Service (Root/Sudo)";
+      if (svcCliTip) {
+        svcCliTip.innerHTML =
+          "<strong>CLI Tip:</strong> You can also manage the service via SSH/terminal using: <code>sudo traffcount service install</code> or <code>traffcount service status</code>";
+      }
+      if (dataCapCardDesc) {
+        dataCapCardDesc.textContent =
+          "Configure a monthly billing-cycle data cap and projected quota tracking on your dashboard.";
+      }
+      if (state.activeTab === "settings") {
+        viewTitleEl.textContent = "Settings & Systemd Service";
+      }
+    }
+  }
+
   function updateDataSourceBadge(source) {
     state.dataSource = source === "service" ? "service" : "app";
     if (!dataSourceBadge) return;
@@ -1914,12 +1952,18 @@
     dataSourceBadge.textContent = isSvc ? "Source: Service" : "Source: App";
     dataSourceBadge.classList.toggle("service", isSvc);
     dataSourceBadge.classList.toggle("app", !isSvc);
-    dataSourceBadge.title = isSvc
-      ? "Data collected by Windows Background Service (TraffCountService)"
-      : "Data collected by standalone desktop application";
+    if (state.platform === "windows") {
+      dataSourceBadge.title = isSvc
+        ? "Data collected by Windows Background Service (TraffCountService)"
+        : "Data collected by standalone desktop application";
+    } else {
+      dataSourceBadge.title = isSvc
+        ? "Data collected by systemd Background Service (traffcount.service)"
+        : "Data collected by standalone CLI web server";
+    }
   }
 
-  // Windows Service Control
+  // Background Service Control
   async function fetchServiceStatus() {
     try {
       const [res, pingRes] = await Promise.all([
@@ -1928,6 +1972,9 @@
       ]);
       if (pingRes && pingRes.ok) {
         const p = await pingRes.json();
+        if (p.platform) {
+          applyPlatformMode(p.platform);
+        }
         if (p.source) {
           updateDataSourceBadge(p.source);
         }
@@ -1941,14 +1988,16 @@
   }
 
   function updateServiceUI(st) {
+    const svcName = state.platform === "windows" ? "TraffCountService" : "traffcount.service";
     svcStateText.textContent = st.installed
-      ? `TraffCountService is ${st.stateText}`
-      : "TraffCountService is not installed (Running in standalone app mode)";
+      ? `${svcName} is ${st.stateText}`
+      : `${svcName} is not installed (Running in standalone mode)`;
     svcBadge.textContent = st.stateText || "Unknown";
     svcBadge.classList.toggle("running", !!st.running);
   }
 
   async function invokeServiceAction(action) {
+    const svcName = state.platform === "windows" ? "TraffCountService" : "traffcount.service";
     const labelMap = {
       install: "Installing & Starting...",
       start: "Starting...",
@@ -1956,7 +2005,7 @@
       uninstall: "Uninstalling...",
     };
     if (svcStateText && labelMap[action]) {
-      svcStateText.textContent = `TraffCountService: ${labelMap[action]}`;
+      svcStateText.textContent = `${svcName}: ${labelMap[action]}`;
     }
     if (svcBadge && labelMap[action]) {
       svcBadge.textContent = labelMap[action];

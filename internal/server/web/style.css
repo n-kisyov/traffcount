@@ -1708,4 +1708,9 @@ body.mini-mode.mini-no-chart .chart-card {
   display: none !important;
 }
 
+body.platform-linux .win-only {
+  display: none !important;
+}
+
+
 

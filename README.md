@@ -1,6 +1,6 @@
 # TraffCount
 
-Real-time network bandwidth monitor and historical traffic counter for Windows 11, written in Go.
+Real-time network bandwidth monitor and historical traffic counter for **Windows 11** and **Raspberry Pi OS / Linux**, written in Go.
 
 ## Screenshots
 
@@ -75,6 +75,53 @@ Configurable monthly billing-cycle data cap with progress bar, bandwidth spike a
 
 # Stop and remove TraffCountService
 .\traffcount.exe service uninstall
+```
+
+## Raspberry Pi OS / Linux
+
+TraffCount runs on **Raspberry Pi 3B+**, **Raspberry Pi 4**, and newer models (both 64-bit `arm64` and 32-bit `armv7` Raspberry Pi OS) as a pure-Go CLI daemon + standalone HTTP/WebSocket web dashboard (`http://<pi-ip>:9876`).
+
+### Build on Raspberry Pi (or cross-compile on Linux)
+
+`build-pi.sh` checks whether Go is installed and meets the version in `go.mod`, offers to install/upgrade Go automatically into `/usr/local/go`, and compiles a static binary (`CGO_ENABLED=0`):
+
+```bash
+chmod +x build-pi.sh
+
+# Auto-detect Raspberry Pi architecture (arm64 or armv7), check/install Go, and build ./traffcount
+./build-pi.sh
+
+# Or explicitly target 64-bit / 32-bit / both
+./build-pi.sh --arch arm64
+./build-pi.sh --arch armv7
+./build-pi.sh --arch all
+
+# Unattended build with automatic Go installation
+./build-pi.sh --install-go -y
+```
+
+### CLI & systemd Service Usage (Raspberry Pi)
+
+```bash
+# Run standalone CLI + web server on 0.0.0.0:9876 (accessible from your LAN)
+./traffcount
+
+# Or specify a custom listen address / port
+./traffcount --addr 0.0.0.0:8080
+
+# Install system-wide and run 24/7 as a systemd background service
+sudo install -m 0755 ./traffcount /usr/local/bin/traffcount
+sudo traffcount service install
+
+# Manage or inspect the systemd service
+traffcount service status
+sudo traffcount service start
+sudo traffcount service stop
+sudo traffcount service restart
+sudo traffcount service uninstall
+
+# Stop a running standalone CLI instance gracefully
+traffcount quit
 ```
 
 ### Capturing Screenshots

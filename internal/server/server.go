@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -94,11 +95,15 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 // Start begins listening and serving until ctx is canceled.
 func (s *Server) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", s.addr)
-	if err != nil && service.IsWindowsServiceProcess() {
-		// If TraffCountService was started directly (e.g. via services.msc or sc start)
-		// while the standalone app holds port 9876, ask the standalone app to release it.
+	if err != nil && service.IsServiceProcess() {
+		// If the background service was started directly while the standalone app holds the port,
+		// ask the standalone app to release it cleanly before rebinding.
+		releaseHost := s.addr
+		if h, p, splitErr := net.SplitHostPort(s.addr); splitErr == nil && (h == "" || h == "0.0.0.0" || h == "::") {
+			releaseHost = net.JoinHostPort("127.0.0.1", p)
+		}
 		client := &http.Client{Timeout: 400 * time.Millisecond}
-		if resp, rErr := client.Post("http://"+s.addr+"/api/server/release", "application/json", nil); rErr == nil {
+		if resp, rErr := client.Post("http://"+releaseHost+"/api/server/release", "application/json", nil); rErr == nil {
 			resp.Body.Close()
 		}
 		for i := 0; i < 25; i++ {
@@ -135,19 +140,20 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	src := "app"
-	if service.IsWindowsServiceProcess() {
+	if service.IsServiceProcess() {
 		src = "service"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"app":     "traffcount",
-		"version": "1.1.0",
-		"source":  src,
+		"ok":       true,
+		"app":      "traffcount",
+		"version":  "1.1.0",
+		"source":   src,
+		"platform": runtime.GOOS,
 	})
 }
 
 func (s *Server) handleServerRelease(w http.ResponseWriter, r *http.Request) {
-	if service.IsWindowsServiceProcess() {
+	if service.IsServiceProcess() {
 		writeJSON(w, http.StatusOK, map[string]any{"released": false, "reason": "service"})
 		return
 	}

@@ -257,7 +257,7 @@ func (c *Collector) closeSubscribers() {
 }
 
 func collectorSource() string {
-	if service.IsWindowsServiceProcess() {
+	if service.IsServiceProcess() {
 		return "service"
 	}
 	return "app"
@@ -267,7 +267,7 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 	now := time.Now()
 	unixNow := now.Unix()
 
-	// Perform SQLite settings lookup, Windows adapter enumeration, and IOCounters outside c.mu.Lock()
+	// Perform SQLite settings lookup, network adapter enumeration, and IOCounters outside c.mu.Lock()
 	// so /api/realtime readers are never blocked on I/O.
 	c.mu.RLock()
 	needMetaRefresh := time.Since(c.metaUpdated) > 10*time.Second || len(c.metaCache) == 0
@@ -275,7 +275,7 @@ func (c *Collector) sample(isSeed bool) RealtimePayload {
 
 	var freshMeta map[string]AdapterMeta
 	if needMetaRefresh {
-		freshMeta = GetWindowsAdapters()
+		freshMeta = GetSystemAdapters()
 	}
 	settings, _ := c.store.GetSettings()
 
