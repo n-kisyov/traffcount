@@ -1,12 +1,15 @@
 package syncpoller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,17 @@ import (
 
 const ringBufferSize = 60
 
+// HostQuotaSummary holds cached monthly data cap telemetry for overview badges.
+type HostQuotaSummary struct {
+	Enabled    bool    `json:"enabled"`
+	CycleLabel string  `json:"cycleLabel"`
+	CapGB      float64 `json:"capGB"`
+	UsedBytes  uint64  `json:"usedBytes"`
+	UsedPct    float64 `json:"usedPct"`
+	Over80     bool    `json:"over80"`
+	Over100    bool    `json:"over100"`
+}
+
 // HostLiveSnapshot combines persisted host state with live 1Hz telemetry and 60s ring buffer.
 type HostLiveSnapshot struct {
 	Host        syncstore.HostRecord            `json:"host"`
@@ -29,6 +43,7 @@ type HostLiveSnapshot struct {
 	History     []collector.RatePoint           `json:"history"`
 	Interfaces  []collector.LiveInterfaceSnapshot `json:"interfaces"`
 	Diagnostics collector.DiagnosticsStatus     `json:"diagnostics"`
+	Quota       HostQuotaSummary                `json:"quota"`
 }
 
 // ClusterRealtimePayload is broadcast every second to Sync Server web dashboards.
@@ -55,6 +70,18 @@ type ProbeResult struct {
 	Error         string `json:"error,omitempty"`
 }
 
+// DiscoveredHost describes a remote TraffCount agent detected via LAN scan.
+type DiscoveredHost struct {
+	BaseURL      string `json:"baseUrl"`
+	Hostname     string `json:"hostname"`
+	Platform     string `json:"platform"`
+	Version      string `json:"version"`
+	Source       string `json:"source"`
+	LatencyMs    int64  `json:"latencyMs"`
+	RequiresAuth bool   `json:"requiresAuth"`
+	AlreadyAdded bool   `json:"alreadyAdded"`
+}
+
 type hostWorkerHandle struct {
 	cfg    syncstore.HostRecord
 	cancel context.CancelFunc
@@ -69,6 +96,7 @@ type hostLiveState struct {
 	history    []collector.RatePoint
 	ifaces     []collector.LiveInterfaceSnapshot
 	diag       collector.DiagnosticsStatus
+	quota      HostQuotaSummary
 	lastPoll   time.Time
 }
 
@@ -301,12 +329,23 @@ func (p *Poller) runHostWorker(ctx context.Context, host syncstore.HostRecord, s
 }
 
 func (p *Poller) doHostRequest(ctx context.Context, host syncstore.HostRecord, method, pathAndQuery string, timeout time.Duration) ([]byte, int, error) {
+	return p.doHostRequestWithBody(ctx, host, method, pathAndQuery, "", nil, timeout)
+}
+
+func (p *Poller) doHostRequestWithBody(ctx context.Context, host syncstore.HostRecord, method, pathAndQuery, contentType string, reqBody []byte, timeout time.Duration) ([]byte, int, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, method, host.BaseURL+pathAndQuery, nil)
+	var bodyReader io.Reader
+	if reqBody != nil {
+		bodyReader = bytes.NewReader(reqBody)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, host.BaseURL+pathAndQuery, bodyReader)
 	if err != nil {
 		return nil, 0, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	if host.APIToken != "" {
 		req.Header.Set("Authorization", "Bearer "+host.APIToken)
@@ -442,6 +481,11 @@ func (p *Poller) pollHostOnce(ctx context.Context, host syncstore.HostRecord) bo
 }
 
 func (p *Poller) syncHostHistory(ctx context.Context, host syncstore.HostRecord) {
+	if fresh, err := p.store.GetHost(host.ID); err == nil {
+		host = fresh
+	}
+	p.refreshHostQuota(ctx, host)
+
 	// Determine incremental sync window: backfill 90 days on first sync, else last 48h to reconcile active hour cleanly.
 	var sinceTS int64
 	if host.LastSyncTS <= 0 {
@@ -470,18 +514,68 @@ func (p *Poller) syncHostHistory(ctx context.Context, host syncstore.HostRecord)
 	}
 }
 
+func (p *Poller) refreshHostQuota(ctx context.Context, host syncstore.HostRecord) {
+	qBody, qCode, qErr := p.doHostRequest(ctx, host, http.MethodGet, "/api/quota", 2500*time.Millisecond)
+	if qErr != nil || qCode != http.StatusOK {
+		return
+	}
+	var qs struct {
+		Enabled    bool    `json:"enabled"`
+		CycleLabel string  `json:"cycleLabel"`
+		CapGB      float64 `json:"capGB"`
+		CapGb      float64 `json:"capGb"`
+		UsedBytes  uint64  `json:"usedBytes"`
+		UsedTotal  uint64  `json:"usedTotal"`
+		UsedPct    float64 `json:"usedPct"`
+		PctUsed    float64 `json:"pctUsed"`
+		Over80     bool    `json:"over80"`
+		Over100    bool    `json:"over100"`
+	}
+	if json.Unmarshal(qBody, &qs) != nil {
+		return
+	}
+	capGB := qs.CapGB
+	if capGB == 0 {
+		capGB = qs.CapGb
+	}
+	usedBytes := qs.UsedBytes
+	if usedBytes == 0 {
+		usedBytes = qs.UsedTotal
+	}
+	usedPct := qs.UsedPct
+	if usedPct == 0 {
+		usedPct = qs.PctUsed
+	}
+	p.mu.Lock()
+	if st, ok := p.live[host.ID]; ok {
+		st.quota = HostQuotaSummary{
+			Enabled:    qs.Enabled,
+			CycleLabel: qs.CycleLabel,
+			CapGB:      capGB,
+			UsedBytes:  usedBytes,
+			UsedPct:    usedPct,
+			Over80:     qs.Over80 || usedPct >= 80,
+			Over100:    qs.Over100 || usedPct >= 100,
+		}
+	}
+	p.mu.Unlock()
+}
+
 func (p *Poller) applySyncExport(hostID string, exp storage.SyncExportPayload) {
-	now := time.Now().Unix()
 	if len(exp.Interfaces) > 0 {
 		ifaces := make([]syncstore.HostInterfaceRecord, 0, len(exp.Interfaces))
 		for _, ic := range exp.Interfaces {
+			nameLower := strings.ToLower(ic.Name)
+			isLoop := strings.Contains(nameLower, "loopback") || nameLower == "lo"
 			ifaces = append(ifaces, syncstore.HostInterfaceRecord{
-				HostID:      hostID,
-				IfaceID:     ic.ID,
-				Name:        ic.Name,
-				Description: ic.Description,
-				MAC:         ic.MAC,
-				LastSeen:    ic.LastSeen,
+				HostID:        hostID,
+				IfaceID:       ic.ID,
+				Name:          ic.Name,
+				Description:   ic.Description,
+				MAC:           ic.MAC,
+				IsLoopback:    isLoop,
+				PreserveState: true,
+				LastSeen:      ic.LastSeen,
 			})
 		}
 		_ = p.store.UpsertHostInterfaces(hostID, ifaces)
@@ -530,7 +624,6 @@ func (p *Poller) applySyncExport(hostID string, exp storage.SyncExportPayload) {
 		}
 		_ = p.store.UpsertHostSpeedTests(hostID, stRows)
 	}
-	_ = now
 }
 
 func (p *Poller) syncHostFallbackHistory(ctx context.Context, host syncstore.HostRecord, sinceTS int64) {
@@ -605,6 +698,7 @@ func (p *Poller) aggregateTick(unixNow int64) ClusterRealtimePayload {
 			snap.SessionRx = st.sessionRx
 			snap.SessionTx = st.sessionTx
 			snap.Diagnostics = st.diag
+			snap.Quota = st.quota
 			if len(st.history) > 0 {
 				snap.History = make([]collector.RatePoint, len(st.history))
 				copy(snap.History, st.history)
@@ -732,12 +826,196 @@ func (p *Poller) ProxyConnections(ctx context.Context, hostID, ifaceIP string, i
 	if err != nil {
 		return nil, http.StatusNotFound, err
 	}
-	q := fmt.Sprintf("/api/connections?ifaceIp=%s&includeUdp=%v", url.QueryEscape(ifaceIP), includeUDP)
+	q := fmt.Sprintf("/api/connections?ip=%s&udp=%v", url.QueryEscape(ifaceIP), includeUDP)
 	body, code, err := p.doHostRequest(ctx, host, http.MethodGet, q, 4*time.Second)
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
 	return body, code, nil
+}
+
+// ProxyApps retrieves known and firewall-blocked applications from a remote host.
+func (p *Poller) ProxyApps(ctx context.Context, hostID string) ([]byte, int, error) {
+	host, err := p.store.GetHost(hostID)
+	if err != nil {
+		return nil, http.StatusNotFound, err
+	}
+	body, code, err := p.doHostRequest(ctx, host, http.MethodGet, "/api/apps", 4*time.Second)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	return body, code, nil
+}
+
+// ProxyFirewallBlock toggles persistent firewall/socket blocking for an application on a remote host.
+func (p *Poller) ProxyFirewallBlock(ctx context.Context, hostID string, reqBody []byte) ([]byte, int, error) {
+	host, err := p.store.GetHost(hostID)
+	if err != nil {
+		return nil, http.StatusNotFound, err
+	}
+	body, code, err := p.doHostRequestWithBody(ctx, host, http.MethodPost, "/api/firewall/block", "application/json", reqBody, 5*time.Second)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	return body, code, nil
+}
+
+// ProxyConnectionsAction forwards socket close or process kill commands to a remote host.
+func (p *Poller) ProxyConnectionsAction(ctx context.Context, hostID string, reqBody []byte) ([]byte, int, error) {
+	host, err := p.store.GetHost(hostID)
+	if err != nil {
+		return nil, http.StatusNotFound, err
+	}
+	body, code, err := p.doHostRequestWithBody(ctx, host, http.MethodPost, "/api/connections/action", "application/json", reqBody, 5*time.Second)
+	if err != nil {
+		return nil, http.StatusBadGateway, err
+	}
+	return body, code, nil
+}
+
+// DiscoverLANHosts scans active private IPv4 /24 subnets on port 9876 for TraffCount agents.
+func (p *Poller) DiscoverLANHosts(ctx context.Context) []DiscoveredHost {
+	existingURLs := make(map[string]bool)
+	if hosts, err := p.store.ListHosts(); err == nil {
+		for _, h := range hosts {
+			existingURLs[h.BaseURL] = true
+		}
+	}
+
+	candidateSet := make(map[string]struct{})
+	candidates := make([]string, 0, 260)
+	addCandidate := func(ip string) {
+		u := "http://" + ip + ":9876"
+		if _, seen := candidateSet[u]; !seen {
+			candidateSet[u] = struct{}{}
+			candidates = append(candidates, u)
+		}
+	}
+
+	addCandidate("127.0.0.1")
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, iface := range ifaces {
+			if (iface.Flags&net.FlagUp) == 0 || (iface.Flags&net.FlagLoopback) != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, a := range addrs {
+				ipNet, ok := a.(*net.IPNet)
+				if !ok || ipNet.IP == nil {
+					continue
+				}
+				ip4 := ipNet.IP.To4()
+				if ip4 == nil || !ip4.IsPrivate() {
+					continue
+				}
+				prefix := fmt.Sprintf("%d.%d.%d", ip4[0], ip4[1], ip4[2])
+				for last := 1; last <= 254; last++ {
+					addCandidate(fmt.Sprintf("%s.%d", prefix, last))
+				}
+			}
+		}
+	}
+
+	type scanResult struct {
+		host DiscoveredHost
+		ok   bool
+	}
+
+	jobs := make(chan string, len(candidates))
+	for _, c := range candidates {
+		jobs <- c
+	}
+	close(jobs)
+
+	scanClient := &http.Client{Timeout: 350 * time.Millisecond}
+	var outMu sync.Mutex
+	found := make([]DiscoveredHost, 0)
+
+	workerCount := 32
+	if len(candidates) < workerCount {
+		workerCount = len(candidates)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for baseURL := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				reqCtx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+				req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/api/ping", nil)
+				if err != nil {
+					cancel()
+					continue
+				}
+				start := time.Now()
+				resp, err := scanClient.Do(req)
+				lat := time.Since(start).Milliseconds()
+				if lat < 1 {
+					lat = 1
+				}
+				if err != nil {
+					cancel()
+					continue
+				}
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				_ = resp.Body.Close()
+				cancel()
+
+				if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+					// Check if unauthorized response matches TraffCount JSON schema
+					if strings.Contains(string(body), "sync API token") {
+						outMu.Lock()
+						found = append(found, DiscoveredHost{
+							BaseURL:      baseURL,
+							Hostname:     strings.TrimPrefix(strings.TrimSuffix(baseURL, ":9876"), "http://"),
+							LatencyMs:    lat,
+							RequiresAuth: true,
+							AlreadyAdded: existingURLs[baseURL],
+						})
+						outMu.Unlock()
+					}
+					continue
+				}
+				if resp.StatusCode != http.StatusOK {
+					continue
+				}
+				var ping struct {
+					OK       bool   `json:"ok"`
+					App      string `json:"app"`
+					Platform string `json:"platform"`
+					Hostname string `json:"hostname"`
+					Version  string `json:"version"`
+					Source   string `json:"source"`
+				}
+				if json.Unmarshal(body, &ping) != nil || !ping.OK || ping.App != "traffcount" {
+					continue
+				}
+				outMu.Lock()
+				found = append(found, DiscoveredHost{
+					BaseURL:      baseURL,
+					Hostname:     ping.Hostname,
+					Platform:     ping.Platform,
+					Version:      ping.Version,
+					Source:       ping.Source,
+					LatencyMs:    lat,
+					AlreadyAdded: existingURLs[baseURL],
+				})
+				outMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	sort.Slice(found, func(i, j int) bool {
+		return found[i].BaseURL < found[j].BaseURL
+	})
+	return found
 }
 
 // ProxyQuota retrieves billing-cycle quota status from a remote host.

@@ -40,6 +40,7 @@ type Settings struct {
 	CompactMiniWidget  bool               `json:"compactMiniWidget"`  // Show mini 60s sparkline inside mini-widget
 	AllowRemoteSync    bool               `json:"allowRemoteSync"`    // Bind 0.0.0.0:9876 on Windows so TraffCount Sync Server can poll remotely
 	SyncApiToken       string             `json:"syncApiToken"`       // Optional Bearer token required for non-loopback sync requests
+	AutoSpeedTestHours int                `json:"autoSpeedTestHours"` // Automatic speed test cadence in hours (0, 6, 12, 24)
 }
 
 // WindowBounds stores the last screen coordinates and size of the dashboard window.
@@ -269,6 +270,11 @@ func normalizeSettings(cfg Settings) Settings {
 		cfg.PingTargets = cfg.PingTargets[:8]
 	}
 	cfg.SyncApiToken = strings.TrimSpace(cfg.SyncApiToken)
+	switch cfg.AutoSpeedTestHours {
+	case 0, 6, 12, 24:
+	default:
+		cfg.AutoSpeedTestHours = 0
+	}
 	return cfg
 }
 

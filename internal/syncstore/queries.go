@@ -56,6 +56,7 @@ type HostInterfaceRecord struct {
 	LinkSpeedBits uint64 `json:"linkSpeedBits"`
 	IsUp          bool   `json:"isUp"`
 	IsLoopback    bool   `json:"isLoopback"`
+	PreserveState bool   `json:"-"` // When true, keep existing DB is_up flag during metadata-only sync
 	LastSeen      int64  `json:"lastSeen"`
 }
 
@@ -416,8 +417,8 @@ func (s *Store) UpsertHostInterfaces(hostID string, ifaces []HostInterfaceRecord
 			ipv4 = CASE WHEN excluded.ipv4 != '' THEN excluded.ipv4 ELSE host_interfaces.ipv4 END,
 			ipv6 = CASE WHEN excluded.ipv6 != '' THEN excluded.ipv6 ELSE host_interfaces.ipv6 END,
 			link_speed_bits = CASE WHEN excluded.link_speed_bits > 0 THEN excluded.link_speed_bits ELSE host_interfaces.link_speed_bits END,
-			is_up = excluded.is_up,
-			is_loopback = excluded.is_loopback,
+			is_up = CASE WHEN ? = 1 THEN host_interfaces.is_up ELSE excluded.is_up END,
+			is_loopback = MAX(host_interfaces.is_loopback, excluded.is_loopback),
 			last_seen = MAX(host_interfaces.last_seen, excluded.last_seen)
 	`)
 	if err != nil {
@@ -431,7 +432,7 @@ func (s *Store) UpsertHostInterfaces(hostID string, ifaces []HostInterfaceRecord
 		if ls == 0 {
 			ls = now
 		}
-		if _, err := stmt.Exec(hostID, r.IfaceID, r.Name, r.Description, r.MAC, r.IPv4, r.IPv6, r.LinkSpeedBits, boolToInt(r.IsUp), boolToInt(r.IsLoopback), ls); err != nil {
+		if _, err := stmt.Exec(hostID, r.IfaceID, r.Name, r.Description, r.MAC, r.IPv4, r.IPv6, r.LinkSpeedBits, boolToInt(r.IsUp), boolToInt(r.IsLoopback), ls, boolToInt(r.PreserveState)); err != nil {
 			return err
 		}
 	}

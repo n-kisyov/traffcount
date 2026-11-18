@@ -393,7 +393,10 @@ func (s *Server) handleRealtime(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filterIP := q.Get("ip")
-	includeUDP := q.Get("udp") == "1" || q.Get("udp") == "true"
+	if filterIP == "" {
+		filterIP = q.Get("ifaceIp")
+	}
+	includeUDP := q.Get("udp") == "1" || q.Get("udp") == "true" || q.Get("includeUdp") == "1" || q.Get("includeUdp") == "true"
 	snap := collector.GetActiveConnections(filterIP, includeUDP)
 	writeJSON(w, http.StatusOK, snap)
 }
@@ -485,7 +488,15 @@ func (s *Server) handleSpeedTest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
+	if collector.IsSpeedTestRunning() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "A speed test is already in progress"})
+		return
+	}
 	res := collector.RunSpeedTest(r.Context())
+	if res.Error == "A speed test is already in progress" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": res.Error})
+		return
+	}
 	if s.store != nil && (res.DownloadMbps > 0 || res.UploadMbps > 0 || res.UnloadedPingMs > 0) {
 		_ = s.store.RecordSpeedTest(storage.SpeedTestRecord{
 			Timestamp:        res.Timestamp,
@@ -651,11 +662,21 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
+		prevCfg, _ := s.store.GetSettings()
 		if err := s.store.SaveSettings(cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 		s.syncToken.Store(strings.TrimSpace(cfg.SyncApiToken))
+		if prevCfg.AllowRemoteSync != cfg.AllowRemoteSync {
+			go func(allow bool) { _ = collector.SyncRemoteAccessFirewallRule(allow) }(cfg.AllowRemoteSync)
+			if !service.IsServiceProcess() {
+				go func() {
+					time.Sleep(80 * time.Millisecond)
+					tray.NotifyTrayReleaseServer()
+				}()
+			}
+		}
 		if cfg.RetentionDays > 0 {
 			go func(days int) { _ = s.store.PruneOldData(days) }(cfg.RetentionDays)
 		}

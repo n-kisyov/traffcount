@@ -208,6 +208,18 @@ func SetFirewallBlockRule(processName, exePath string, block bool) error {
 	return nil
 }
 
+// SyncRemoteAccessFirewallRule adds or removes an inbound Windows Defender Firewall allow rule on TCP 9876
+// so TraffCount Sync Server can poll this host on the LAN.
+func SyncRemoteAccessFirewallRule(allow bool) error {
+	const ruleName = "TraffCount_Remote_Sync_In_TCP9876"
+	_ = runNetshFirewall("advfirewall", "firewall", "delete", "rule", "name="+ruleName)
+	if !allow {
+		return nil
+	}
+	return runNetshFirewall("advfirewall", "firewall", "add", "rule",
+		"name="+ruleName, "dir=in", "action=allow", "protocol=TCP", "localport=9876", "enable=yes")
+}
+
 func runNetshFirewall(args ...string) error {
 	cmd := exec.Command("netsh", args...)
 	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true}

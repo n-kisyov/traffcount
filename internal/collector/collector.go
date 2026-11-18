@@ -99,6 +99,8 @@ type Collector struct {
 	alertMu      sync.Mutex
 	newAppAlerts []string
 	appsSeeded   bool
+
+	lastAutoSpeedTest time.Time
 }
 
 // New creates a new Collector backed by the provided SQLite Store.
@@ -172,18 +174,25 @@ func (c *Collector) Run(ctx context.Context) {
 	go func() {
 		_ = GetActiveConnections("", false)
 		c.FlushToDB()
+		c.alertMu.Lock()
+		c.appsSeeded = true
+		c.newAppAlerts = nil
+		c.alertMu.Unlock()
 	}()
+	c.lastAutoSpeedTest = time.Now()
 	c.sample(true)
 
 	pollTicker := time.NewTicker(1 * time.Second)
 	flushTicker := time.NewTicker(15 * time.Second)
 	diagTicker := time.NewTicker(3 * time.Second)
 	procTicker := time.NewTicker(2 * time.Second)
+	autoTestTicker := time.NewTicker(1 * time.Minute)
 	pruneTicker := time.NewTicker(24 * time.Hour)
 	defer pollTicker.Stop()
 	defer flushTicker.Stop()
 	defer diagTicker.Stop()
 	defer procTicker.Stop()
+	defer autoTestTicker.Stop()
 	defer pruneTicker.Stop()
 
 	for {
@@ -203,12 +212,47 @@ func (c *Collector) Run(ctx context.Context) {
 			go func() {
 				_ = GetActiveConnections("", false)
 			}()
+		case <-autoTestTicker.C:
+			c.maybeRunScheduledSpeedTest(ctx)
 		case <-pruneTicker.C:
 			if cfg, err := c.store.GetSettings(); err == nil && cfg.RetentionDays > 0 {
 				_ = c.store.PruneOldData(cfg.RetentionDays)
 			}
 		}
 	}
+}
+
+func (c *Collector) maybeRunScheduledSpeedTest(ctx context.Context) {
+	if c.store == nil || IsSpeedTestRunning() {
+		return
+	}
+	cfg, err := c.store.GetSettings()
+	if err != nil || cfg.AutoSpeedTestHours <= 0 {
+		return
+	}
+	interval := time.Duration(cfg.AutoSpeedTestHours) * time.Hour
+	if time.Since(c.lastAutoSpeedTest) < interval {
+		return
+	}
+	c.lastAutoSpeedTest = time.Now()
+	go func() {
+		tCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		defer cancel()
+		res := RunSpeedTest(tCtx)
+		if res.Error == "" && (res.DownloadMbps > 0 || res.UploadMbps > 0 || res.UnloadedPingMs > 0) {
+			_ = c.store.RecordSpeedTest(storage.SpeedTestRecord{
+				Timestamp:        res.Timestamp,
+				UnloadedPingMs:   res.UnloadedPingMs,
+				JitterMs:         res.JitterMs,
+				LoadedPingMs:     res.LoadedPingMs,
+				DownloadMbps:     res.DownloadMbps,
+				UploadMbps:       res.UploadMbps,
+				BufferbloatGrade: res.BufferbloatGrade,
+				ServerLabel:      res.ServerLabel,
+				Error:            res.Error,
+			})
+		}
+	}()
 }
 
 func (c *Collector) probeWithSettings() {

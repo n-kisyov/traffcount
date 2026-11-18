@@ -23,6 +23,7 @@
       compactMiniWidget: true,
       allowRemoteSync: false,
       syncApiToken: "",
+      autoSpeedTestHours: 0,
     },
     miniMode: false,
     wasMaximizedBeforeMini: false,
@@ -172,6 +173,7 @@
   const btnAddPingTarget = document.getElementById("btnAddPingTarget");
   const pingTargetsList = document.getElementById("pingTargetsList");
   const selectRetentionDays = document.getElementById("selectRetentionDays");
+  const selectAutoSpeedTest = document.getElementById("selectAutoSpeedTest");
   const chkDataCapEnabled = document.getElementById("chkDataCapEnabled");
   const inputDataCapGB = document.getElementById("inputDataCapGB");
   const inputBillingDay = document.getElementById("inputBillingDay");
@@ -266,6 +268,7 @@
     document.body.classList.toggle("mini-no-chart", state.settings.compactMiniWidget === false);
     if (chkPingGateway) chkPingGateway.checked = state.settings.pingGateway !== false;
     if (selectRetentionDays) selectRetentionDays.value = String(state.settings.retentionDays || 365);
+    if (selectAutoSpeedTest) selectAutoSpeedTest.value = String(state.settings.autoSpeedTestHours || 0);
     renderPingTargetsList();
     if (chkDataCapEnabled) chkDataCapEnabled.checked = !!state.settings.dataCapEnabled;
     if (inputDataCapGB) inputDataCapGB.value = state.settings.dataCapGB || 500;
@@ -454,6 +457,13 @@
     selectRetentionDays.addEventListener("change", () => {
       const days = parseInt(selectRetentionDays.value, 10) || 365;
       saveSettings({ retentionDays: days });
+    });
+  }
+
+  if (selectAutoSpeedTest) {
+    selectAutoSpeedTest.addEventListener("change", () => {
+      const hrs = parseInt(selectAutoSpeedTest.value, 10) || 0;
+      saveSettings({ autoSpeedTestHours: hrs });
     });
   }
 

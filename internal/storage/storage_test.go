@@ -305,3 +305,70 @@ func TestStoreTrafficAndHistory(t *testing.T) {
 	}
 }
 
+func TestLoopbackExclusionAndCaseInsensitiveKnownApps(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "loop-case-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	_ = store.RecordTrafficBatch([]TrafficDelta{
+		{IfaceID: "eth0", Name: "Ethernet", Timestamp: now, RxBytes: 5000, TxBytes: 1000},
+		{IfaceID: "lo", Name: "lo", Timestamp: now, RxBytes: 900000, TxBytes: 900000},
+		{IfaceID: "loopback_pseudo", Name: "Loopback Pseudo-Interface 1", Timestamp: now, RxBytes: 100000, TxBytes: 100000},
+	})
+
+	cfg, _ := store.GetSettings()
+	cfg.HideLoopback = true
+	cfg.DataCapEnabled = true
+	cfg.DataCapGB = 10
+	cfg.BillingDay = 1
+	_ = store.SaveSettings(cfg)
+
+	repHidden, err := store.QueryHistory(now.Add(-time.Hour), now, "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repHidden.TotalRxBytes != 5000 || repHidden.TotalTxBytes != 1000 {
+		t.Fatalf("expected loopback filtered out when HideLoopback=true, got rx=%d tx=%d", repHidden.TotalRxBytes, repHidden.TotalTxBytes)
+	}
+	qs, err := store.QueryQuotaStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if qs.UsedTotal != 6000 {
+		t.Fatalf("expected quota UsedTotal=6000 without loopback, got %d", qs.UsedTotal)
+	}
+
+	cfg.HideLoopback = false
+	_ = store.SaveSettings(cfg)
+	repShown, err := store.QueryHistory(now.Add(-time.Hour), now, "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repShown.TotalRxBytes != 1005000 {
+		t.Fatalf("expected loopback included when HideLoopback=false, got rx=%d", repShown.TotalRxBytes)
+	}
+
+	// Mixed-case known_apps deduplication and block/unblock toggle
+	if err := store.SetAppBlocked("Chrome.exe", `C:\chrome.exe`, true); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.RecordProcessTrafficBatch([]ProcessTrafficDelta{
+		{ProcessName: "chrome.exe", Timestamp: now, RxBytes: 1024, TxBytes: 512},
+	})
+	if err := store.SetAppBlocked("chrome.exe", "", false); err != nil {
+		t.Fatal(err)
+	}
+	blocked, _ := store.GetBlockedApps()
+	if blocked["chrome.exe"] || blocked["Chrome.exe"] {
+		t.Fatalf("expected Chrome.exe unblocked across case variations, got %v", blocked)
+	}
+	apps, _ := store.ListKnownApps()
+	if len(apps) != 1 || apps[0].Blocked {
+		t.Fatalf("expected single canonical known_apps entry unblocked, got %+v", apps)
+	}
+}
+
+

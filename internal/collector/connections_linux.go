@@ -391,6 +391,11 @@ func SetFirewallBlockRule(processName, exePath string, block bool) error {
 	return nil
 }
 
+// SyncRemoteAccessFirewallRule is a no-op on Linux hosts where binding 0.0.0.0:9876 handles LAN exposure.
+func SyncRemoteAccessFirewallRule(allow bool) error {
+	return nil
+}
+
 func queryProcessImageNameAndPath(pid uint32) (string, string) {
 	procDir := fmt.Sprintf("/proc/%d", pid)
 	exePath, err := os.Readlink(filepath.Join(procDir, "exe"))

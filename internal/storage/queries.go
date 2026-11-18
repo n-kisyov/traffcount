@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -143,7 +144,7 @@ func (s *Store) RecordProcessTrafficBatch(deltas []ProcessTrafficDelta) ([]strin
 	}
 	defer tx.Rollback()
 
-	checkStmt, err := tx.Prepare(`SELECT 1 FROM known_apps WHERE process_name = ?`)
+	checkStmt, err := tx.Prepare(`SELECT process_name FROM known_apps WHERE LOWER(process_name) = LOWER(?) LIMIT 1`)
 	if err != nil {
 		return nil, err
 	}
@@ -186,15 +187,20 @@ func (s *Store) RecordProcessTrafficBatch(deltas []ProcessTrafficDelta) ([]strin
 		unixNow := ts.Unix()
 		bucketTS := TruncateToHour(ts)
 
-		var dummy int
-		err := checkStmt.QueryRow(d.ProcessName).Scan(&dummy)
-		if err != nil && !isInitialSeed {
-			newApps = append(newApps, d.ProcessName)
+		procKey := d.ProcessName
+		var existingName string
+		err := checkStmt.QueryRow(d.ProcessName).Scan(&existingName)
+		if err != nil {
+			if !isInitialSeed {
+				newApps = append(newApps, d.ProcessName)
+			}
+		} else if existingName != "" {
+			procKey = existingName
 		}
 
-		_, _ = appStmt.Exec(d.ProcessName, d.ExePath, unixNow, unixNow)
+		_, _ = appStmt.Exec(procKey, d.ExePath, unixNow, unixNow)
 		if d.RxBytes > 0 || d.TxBytes > 0 {
-			_, _ = trafficStmt.Exec(d.ProcessName, d.ExePath, bucketTS, d.RxBytes, d.TxBytes)
+			_, _ = trafficStmt.Exec(procKey, d.ExePath, bucketTS, d.RxBytes, d.TxBytes)
 		}
 	}
 
@@ -232,6 +238,8 @@ func (s *Store) ListInterfaces() ([]InterfaceRecord, error) {
 
 // QueryHistory aggregates historical traffic between start and end for a specific NIC or "all".
 func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryReport, error) {
+	cfg, _ := s.GetSettings()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -257,9 +265,13 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 		ByInterface:   []InterfaceSummary{},
 	}
 
-	// 1. Per-interface breakdown for the entire time window (always across all interfaces for comparison,
-	// or filtered if requested, though showing all NICs in the breakdown table is super useful).
-	ifaceRows, err := s.db.Query(`
+	loopbackFilter := ""
+	if cfg.HideLoopback {
+		loopbackFilter = ` AND LOWER(COALESCE(i.name, t.iface_id)) NOT LIKE '%loopback%' AND LOWER(COALESCE(i.name, t.iface_id)) != 'lo'`
+	}
+
+	// 1. Per-interface breakdown for the entire time window
+	ifaceQuery := `
 		SELECT
 			t.iface_id,
 			COALESCE(i.name, t.iface_id) AS name,
@@ -269,10 +281,11 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 			SUM(t.tx_bytes) AS tx
 		FROM traffic_hourly t
 		LEFT JOIN interfaces i ON i.id = t.iface_id
-		WHERE t.bucket_ts >= ? AND t.bucket_ts <= ?
+		WHERE t.bucket_ts >= ? AND t.bucket_ts <= ?` + loopbackFilter + `
 		GROUP BY t.iface_id
 		ORDER BY (SUM(t.rx_bytes) + SUM(t.tx_bytes)) DESC
-	`, startTS, endTS)
+	`
+	ifaceRows, err := s.db.Query(ifaceQuery, startTS, endTS)
 	if err != nil {
 		return nil, fmt.Errorf("query interface breakdown: %w", err)
 	}
@@ -303,11 +316,12 @@ func (s *Store) QueryHistory(start, end time.Time, ifaceID string) (*HistoryRepo
 	var args []any
 	if ifaceID == "all" {
 		seriesQuery = `
-			SELECT bucket_ts, SUM(rx_bytes), SUM(tx_bytes)
-			FROM traffic_hourly
-			WHERE bucket_ts >= ? AND bucket_ts <= ?
-			GROUP BY bucket_ts
-			ORDER BY bucket_ts ASC
+			SELECT t.bucket_ts, SUM(t.rx_bytes), SUM(t.tx_bytes)
+			FROM traffic_hourly t
+			LEFT JOIN interfaces i ON i.id = t.iface_id
+			WHERE t.bucket_ts >= ? AND t.bucket_ts <= ?` + loopbackFilter + `
+			GROUP BY t.bucket_ts
+			ORDER BY t.bucket_ts ASC
 		`
 		args = []any{startTS, endTS}
 	} else {
@@ -538,11 +552,16 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 
 	var rx, tx uint64
 	if cfg.DataCapIface == "" || cfg.DataCapIface == "all" {
-		_ = s.db.QueryRow(`
-			SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
-			FROM traffic_hourly
-			WHERE bucket_ts >= ?
-		`, cycleStart.Unix()).Scan(&rx, &tx)
+		qSQL := `
+			SELECT COALESCE(SUM(t.rx_bytes), 0), COALESCE(SUM(t.tx_bytes), 0)
+			FROM traffic_hourly t
+			LEFT JOIN interfaces i ON i.id = t.iface_id
+			WHERE t.bucket_ts >= ?
+		`
+		if cfg.HideLoopback {
+			qSQL += ` AND LOWER(COALESCE(i.name, t.iface_id)) NOT LIKE '%loopback%' AND LOWER(COALESCE(i.name, t.iface_id)) != 'lo'`
+		}
+		_ = s.db.QueryRow(qSQL, cycleStart.Unix()).Scan(&rx, &tx)
 	} else {
 		_ = s.db.QueryRow(`
 			SELECT COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
@@ -572,7 +591,7 @@ func (s *Store) QueryQuotaStatus() (QuotaStatus, error) {
 	return qs, nil
 }
 
-// SetAppBlocked records whether an application is blocked in Windows Firewall.
+// SetAppBlocked records whether an application is blocked in Windows Firewall (case-insensitive).
 func (s *Store) SetAppBlocked(processName, exePath string, blocked bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -582,7 +601,19 @@ func (s *Store) SetAppBlocked(processName, exePath string, blocked bool) error {
 	if blocked {
 		bVal = 1
 	}
-	_, err := s.db.Exec(`
+	var existing string
+	err := s.db.QueryRow(`SELECT process_name FROM known_apps WHERE LOWER(process_name) = LOWER(?) LIMIT 1`, processName).Scan(&existing)
+	if err == nil && existing != "" {
+		_, err = s.db.Exec(`
+			UPDATE known_apps
+			SET exe_path = CASE WHEN ? != '' THEN ? ELSE exe_path END,
+			    last_seen = ?,
+			    blocked = ?
+			WHERE LOWER(process_name) = LOWER(?)
+		`, exePath, exePath, now, bVal, processName)
+		return err
+	}
+	_, err = s.db.Exec(`
 		INSERT INTO known_apps (process_name, exe_path, first_seen, last_seen, blocked)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(process_name) DO UPDATE SET
@@ -593,7 +624,7 @@ func (s *Store) SetAppBlocked(processName, exePath string, blocked bool) error {
 	return err
 }
 
-// GetBlockedApps returns a map of processName -> true for all blocked applications.
+// GetBlockedApps returns a map of lowercase processName -> true (plus original casing) for all blocked applications.
 func (s *Store) GetBlockedApps() (map[string]bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -608,6 +639,7 @@ func (s *Store) GetBlockedApps() (map[string]bool, error) {
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err == nil {
+			res[strings.ToLower(name)] = true
 			res[name] = true
 		}
 	}

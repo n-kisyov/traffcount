@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -66,6 +67,7 @@ func New(addr string, store *syncstore.Store, poller *syncpoller.Poller, svcMgr 
 	mux.HandleFunc("/api/ping", s.handlePing)
 	mux.HandleFunc("/api/realtime", s.handleRealtime)
 	mux.HandleFunc("/api/hosts/test", s.handleTestHost)
+	mux.HandleFunc("/api/hosts/discover", s.handleDiscoverHosts)
 	mux.HandleFunc("/api/hosts/", s.handleHostByID)
 	mux.HandleFunc("/api/hosts", s.handleHosts)
 	mux.HandleFunc("/api/speedtest/history", s.handleSpeedTestHistory)
@@ -233,6 +235,15 @@ func (s *Server) handleTestHost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) handleDiscoverHosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	found := s.poller.DiscoverLANHosts(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": found})
+}
+
 func (s *Server) handleHostByID(w http.ResponseWriter, r *http.Request) {
 	rel := strings.TrimPrefix(r.URL.Path, "/api/hosts/")
 	rel = strings.Trim(rel, "/")
@@ -261,9 +272,43 @@ func (s *Server) handleHostByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case "connections":
-		ifaceIP := r.URL.Query().Get("ifaceIp")
-		includeUDP := r.URL.Query().Get("includeUdp") == "true"
+		ifaceIP := r.URL.Query().Get("ip")
+		if ifaceIP == "" {
+			ifaceIP = r.URL.Query().Get("ifaceIp")
+		}
+		includeUDP := r.URL.Query().Get("udp") == "1" || r.URL.Query().Get("udp") == "true" || r.URL.Query().Get("includeUdp") == "true"
 		body, code, err := s.poller.ProxyConnections(r.Context(), id, ifaceIP, includeUDP)
+		if err != nil {
+			writeJSON(w, code, map[string]string{"error": err.Error()})
+			return
+		}
+		writeRawJSON(w, code, body)
+	case "connections/action":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		reqBody, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		body, code, err := s.poller.ProxyConnectionsAction(r.Context(), id, reqBody)
+		if err != nil {
+			writeJSON(w, code, map[string]string{"error": err.Error()})
+			return
+		}
+		writeRawJSON(w, code, body)
+	case "apps":
+		body, code, err := s.poller.ProxyApps(r.Context(), id)
+		if err != nil {
+			writeJSON(w, code, map[string]string{"error": err.Error()})
+			return
+		}
+		writeRawJSON(w, code, body)
+	case "firewall/block":
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		reqBody, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		body, code, err := s.poller.ProxyFirewallBlock(r.Context(), id, reqBody)
 		if err != nil {
 			writeJSON(w, code, map[string]string{"error": err.Error()})
 			return

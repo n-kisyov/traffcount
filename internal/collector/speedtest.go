@@ -8,8 +8,16 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
+
+var speedTestInFlight atomic.Bool
+
+// IsSpeedTestRunning reports whether a bandwidth/bufferbloat probe is currently running.
+func IsSpeedTestRunning() bool {
+	return speedTestInFlight.Load()
+}
 
 // SpeedTestResult holds the results of a bandwidth & bufferbloat test.
 type SpeedTestResult struct {
@@ -31,6 +39,11 @@ func RunSpeedTest(ctx context.Context) SpeedTestResult {
 		Timestamp:   time.Now().Unix(),
 		ServerLabel: "Cloudflare Global Anycast (speed.cloudflare.com)",
 	}
+	if !speedTestInFlight.CompareAndSwap(false, true) {
+		res.Error = "A speed test is already in progress"
+		return res
+	}
+	defer speedTestInFlight.Store(false)
 
 	// 1. Measure unloaded TCP handshake latency & jitter (5 samples to 1.1.1.1:443)
 	var samples []float64
