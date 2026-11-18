@@ -919,22 +919,17 @@ func (p *Poller) DiscoverLANHosts(ctx context.Context) []DiscoveredHost {
 		}
 	}
 
-	type scanResult struct {
-		host DiscoveredHost
-		ok   bool
-	}
-
 	jobs := make(chan string, len(candidates))
 	for _, c := range candidates {
 		jobs <- c
 	}
 	close(jobs)
 
-	scanClient := &http.Client{Timeout: 350 * time.Millisecond}
+	scanClient := &http.Client{Timeout: 250 * time.Millisecond}
 	var outMu sync.Mutex
 	found := make([]DiscoveredHost, 0)
 
-	workerCount := 32
+	workerCount := 64
 	if len(candidates) < workerCount {
 		workerCount = len(candidates)
 	}
@@ -947,7 +942,7 @@ func (p *Poller) DiscoverLANHosts(ctx context.Context) []DiscoveredHost {
 				if ctx.Err() != nil {
 					return
 				}
-				reqCtx, cancel := context.WithTimeout(ctx, 350*time.Millisecond)
+				reqCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 				req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/api/ping", nil)
 				if err != nil {
 					cancel()

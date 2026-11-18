@@ -58,4 +58,42 @@ func TestSyncServerAPIRoutes(t *testing.T) {
 	if hosts[0].APIToken != "" || !hosts[0].HasToken {
 		t.Fatalf("expected APIToken masked in list response while HasToken=true, got %+v", hosts[0])
 	}
+
+	// 4. Proxy endpoints against a live mock agent server
+	mockAgent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/apps":
+			_, _ = w.Write([]byte(`{"apps":[{"processName":"nginx","blocked":false}]}`))
+		case "/api/firewall/block":
+			_, _ = w.Write([]byte(`{"ok":true,"blocked":true}`))
+		case "/api/connections/action":
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockAgent.Close()
+
+	hMock, err := st.CreateHost(syncstore.HostInput{Name: "ProxyHost", BaseURL: mockAgent.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recApps := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(recApps, httptest.NewRequest(http.MethodGet, "/api/hosts/"+hMock.ID+"/apps", nil))
+	if recApps.Code != http.StatusOK || !strings.Contains(recApps.Body.String(), `"nginx"`) {
+		t.Fatalf("expected proxied /apps 200 OK, got %d: %s", recApps.Code, recApps.Body.String())
+	}
+
+	recFw := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(recFw, httptest.NewRequest(http.MethodPost, "/api/hosts/"+hMock.ID+"/firewall/block", bytes.NewBufferString(`{"processName":"nginx","blocked":true}`)))
+	if recFw.Code != http.StatusOK || !strings.Contains(recFw.Body.String(), `"blocked":true`) {
+		t.Fatalf("expected proxied /firewall/block 200 OK, got %d: %s", recFw.Code, recFw.Body.String())
+	}
+
+	recAct := httptest.NewRecorder()
+	srv.httpSrv.Handler.ServeHTTP(recAct, httptest.NewRequest(http.MethodPost, "/api/hosts/"+hMock.ID+"/connections/action", bytes.NewBufferString(`{"action":"kill_process","pid":999}`)))
+	if recAct.Code != http.StatusOK || !strings.Contains(recAct.Body.String(), `"ok":true`) {
+		t.Fatalf("expected proxied /connections/action 200 OK, got %d: %s", recAct.Code, recAct.Body.String())
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -48,20 +49,47 @@ func makeMockAgent(t *testing.T, platform, token string, rxBps, txBps uint64, bu
 			TotalTxBps: txBps,
 			Interfaces: []collector.LiveInterfaceSnapshot{
 				{ID: "eth0", Name: "eth0", IPv4: "10.0.0.10", IsUp: true, CurrentRxBps: rxBps, CurrentTxBps: txBps},
+				{ID: "lo", Name: "lo", IPv4: "127.0.0.1", IsUp: true, IsLoopback: true, CurrentRxBps: 99999, CurrentTxBps: 99999},
 			},
+		})
+	})
+	mux.HandleFunc("/api/quota", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(storage.QuotaStatus{
+			Enabled:    true,
+			CycleLabel: "Since Nov 01",
+			CapGB:      100,
+			UsedBytes:  25 * 1024 * 1024 * 1024,
+			UsedPct:    25.0,
+		})
+	})
+	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) {
+		if !checkAuth(w, r) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"apps": []map[string]any{{"processName": "curl", "blocked": false}},
 		})
 	})
 	mux.HandleFunc("/api/sync/export", func(w http.ResponseWriter, r *http.Request) {
 		if !checkAuth(w, r) {
 			return
 		}
+		sinceQ := r.URL.Query().Get("since")
+		if v, err := strconv.ParseInt(sinceQ, 10, 64); err == nil {
+			w.Header().Set("X-Seen-Since", strconv.FormatInt(v, 10))
+		}
 		_ = json.NewEncoder(w).Encode(storage.SyncExportPayload{
 			ServerTS: time.Now().Unix(),
 			Interfaces: []storage.InterfaceRecord{
 				{ID: "eth0", Name: "eth0", Description: "Mock NIC"},
+				{ID: "lo", Name: "lo", Description: "Loopback"},
 			},
 			Traffic: []storage.SyncTrafficRow{
 				{IfaceID: "eth0", BucketTS: bucketTS, RxBytes: rxBps * 10, TxBytes: txBps * 10},
+				{IfaceID: "lo", BucketTS: bucketTS, RxBytes: 999999, TxBytes: 999999},
 			},
 			Processes: []storage.SyncProcessRow{
 				{ProcessName: "curl", ExePath: "/usr/bin/curl", BucketTS: bucketTS, RxBytes: rxBps * 5, TxBytes: txBps * 2},
@@ -128,6 +156,18 @@ func TestPollerMultiHostLiveAndHistorySync(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rep.TotalRxBytes != 35000 || rep.TotalTxBytes != 7000 {
-		t.Fatalf("expected synced fleet totals Rx=35000 Tx=7000, got Rx=%d Tx=%d", rep.TotalRxBytes, rep.TotalTxBytes)
+		t.Fatalf("expected synced fleet totals Rx=35000 Tx=7000 (loopback preserved & filtered), got Rx=%d Tx=%d", rep.TotalRxBytes, rep.TotalTxBytes)
+	}
+	// Verify cached quota and fresh LastSyncTS update after syncHostHistory
+	if !cluster.Hosts[0].Quota.Enabled || cluster.Hosts[0].Quota.UsedPct != 25.0 {
+		t.Fatalf("expected cached host quota summary (25%%), got %+v", cluster.Hosts[0].Quota)
+	}
+	reloadedWin, _ := st.GetHost(hWin.ID)
+	if reloadedWin.LastSyncTS == 0 {
+		t.Fatalf("expected LastSyncTS updated in store after syncHostHistory")
+	}
+	appsRaw, appsCode, err := poller.ProxyApps(context.Background(), hWin.ID)
+	if err != nil || appsCode != http.StatusOK || len(appsRaw) == 0 {
+		t.Fatalf("expected ProxyApps 200 OK, got code=%d err=%v", appsCode, err)
 	}
 }
