@@ -1021,7 +1021,9 @@
   }
 
   document.getElementById("btnRefreshExpConns").addEventListener("click", () => {
-    if (state.explorerHostID) fetchHostConnections(state.explorerHostID);
+    if (!state.explorerHostID) return;
+    if (state.expConnSubTab === "apps") fetchHostApps(state.explorerHostID);
+    else fetchHostConnections(state.explorerHostID);
   });
 
   document.getElementById("btnExplorerSync").addEventListener("click", async () => {

@@ -153,9 +153,20 @@ traffcount quit
 .\traffcount-sync.exe hosts list       # List registered remote hosts
 ```
 
+### Build & Run on Raspberry Pi OS / Linux (`traffcount-sync`)
+
+```bash
+chmod +x build-sync-pi.sh
+./build-sync-pi.sh                        # Auto-detects Pi arch (arm64/armv7), checks/installs Go, builds ./traffcount-sync
+sudo install -m 0755 ./traffcount-sync /usr/local/bin/traffcount-sync
+sudo traffcount-sync service install      # Run Sync Server 24/7 as traffcount-sync.service
+```
+
 ### Polling Windows 11 Agents Remotely
 
-Raspberry Pi agents listen on `0.0.0.0:9876` by default. On Windows 11 agents (`traffcount.exe`), open **Settings & Service**, enable **Allow Remote Sync Server Polling (LAN)** (optionally setting a Bearer **Sync API Token**), and restart `TraffCountService` / the app so port `9876` listens on LAN.
+Raspberry Pi agents listen on `0.0.0.0:9876` by default. On Windows 11 agents (`traffcount.exe`), open **Settings & Service**, enable **Allow Remote Sync Server Polling (LAN)** (which opens TCP `9876` on Windows Firewall when Service/Admin and optionally enforces a Bearer **Sync API Token**), or click **Scan LAN** inside Sync Server's **Add Remote Host** dialog to auto-discover hosts on your network.
+
+In **Host Explorer**, you can inspect remote host Monthly Data Cap quotas, view active sockets/processes, remotely close sockets, terminate processes, toggle per-app firewall blocks, or trigger on-demand / scheduled automatic speed & Bufferbloat tests.
 
 ### Capturing Screenshots
 
