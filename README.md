@@ -14,24 +14,39 @@ Long-term historical bandwidth accounting stored in SQLite across reboots, with 
 
 ![Historical Traffic Counter](docs/screenshots/02-traffic-history.png)
 
-### 3. Live Network Connections & Process Monitor
-Active TCP/UDP sockets table displaying process names, PIDs, local and remote endpoints, protocol states (Established, Listening, Time-Wait), Geo/Host lookups, and socket filtering.
+### 3. Live Network Connections, Process Monitor & Firewall Control
+Active TCP/UDP sockets and process bandwidth table displaying PIDs, local and remote endpoints, TCP RTT, Geo/Host lookups, socket close / process termination actions, and persistent per-app firewall blocking.
 
 ![Live Network Connections](docs/screenshots/03-active-connections.png)
 
 ### 4. Speed Test & Bufferbloat Diagnostics
-Built-in latency, jitter, download/upload throughput benchmark, and Bufferbloat grade evaluation via Cloudflare Global Anycast.
+Built-in latency, jitter, download/upload throughput benchmark, Bufferbloat grade evaluation via Cloudflare Global Anycast, and historical speed test log.
 
 ![Speed & Bufferbloat Diagnostics](docs/screenshots/04-speed-test.png)
 
-### 5. Settings, Windows Service & Quota Management
-Configurable monthly billing-cycle data cap with progress bar, bandwidth spike alerts, color themes (Win11 Dark, Antigravity IDE, Nord, Dracula, Emerald, Light), and Windows Background Service controls.
+### 5. Settings, Service Management & Remote Sync Polling
+Color themes (Win11 Dark, Antigravity IDE, Nord, Dracula, Emerald, Light), Windows/systemd service controls, opt-in LAN Sync Polling & API token configuration, monthly billing-cycle data cap, and SQLite backup/retention settings.
 
 ![Settings & Windows Service Management](docs/screenshots/05-settings-service.png)
 
 > **Tip:** TraffCount also includes a compact **Mini Widget** floating overlay mode (`380x230`) that stays pinned on top of your desktop for quick glanceable throughput monitoring:
 >
 > ![Mini Widget Mode](docs/screenshots/06-mini-widget.png)
+
+### 6. TraffCount Sync Server — Multi-Host Fleet Overview
+Central multi-host web dashboard (`traffcount-sync.exe` on port `9880`) aggregating 1 Hz real-time bandwidth across multiple Windows 11 and Raspberry Pi hosts.
+
+![TraffCount Sync Fleet Overview](docs/screenshots/07-sync-fleet-overview.png)
+
+### 7. TraffCount Sync Server — Host Explorer
+Per-host drill-down showing live throughput, gateway/DNS ping probes, monthly data cap quota progress, proxied live connections, and remote speed test triggers.
+
+![TraffCount Sync Host Explorer](docs/screenshots/08-sync-host-explorer.png)
+
+### 8. TraffCount Sync Server — Fleet History
+Synced hourly/daily multi-host traffic volume charts, per-host traffic share breakdown, top applications across hosts, and CSV/JSON fleet export.
+
+![TraffCount Sync Fleet History](docs/screenshots/09-sync-fleet-history.png)
 
 ## Features
 
@@ -144,7 +159,7 @@ Raspberry Pi agents listen on `0.0.0.0:9876` by default. On Windows 11 agents (`
 
 ### Capturing Screenshots
 
-To regenerate the documentation screenshots using headless Edge via the Chrome DevTools Protocol:
+To regenerate all documentation screenshots (`docs/screenshots/01-*.png` through `09-*.png`) using headless Edge/Chrome via CDP (connects to running local instances if active, or automatically spawns isolated temporary instances of `traffcount.exe` and `traffcount-sync.exe` with sample multi-host telemetry):
 
 ```powershell
 node scripts/capture_all.js
