@@ -187,8 +187,15 @@ func runDaemon(ctx context.Context, addr string, winMgr *winui.Manager, onTopCha
 	}
 	defer store.Close()
 
+	cfg, _ := store.GetSettings()
+	bindAddr := addr
+	if envAddr := strings.TrimSpace(os.Getenv("TRAFFCOUNT_ADDR")); envAddr != "" && addr == defaultAddr {
+		bindAddr = envAddr
+	} else if addr == defaultAddr && cfg.AllowRemoteSync {
+		bindAddr = "0.0.0.0:9876"
+	}
+
 	if winMgr == nil {
-		cfg, _ := store.GetSettings()
 		winMgr = winui.NewManager("http://"+addr, cfg.AlwaysOnTop)
 	}
 	if b, err := store.GetWindowBounds(); err == nil && b.HasValue {
@@ -198,7 +205,7 @@ func runDaemon(ctx context.Context, addr string, winMgr *winui.Manager, onTopCha
 	coll := collector.New(store)
 	go coll.Run(ctx)
 
-	srv := server.New(addr, store, coll, winMgr, onTopChanged)
+	srv := server.New(bindAddr, store, coll, winMgr, onTopChanged)
 	return srv.Start(ctx)
 }
 

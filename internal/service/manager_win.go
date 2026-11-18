@@ -24,13 +24,7 @@ const (
 	ServiceDescription = "Collects real-time and historical network interface traffic statistics for TraffCount on Windows 11."
 )
 
-// StatusInfo represents the current state of the TraffCount Windows Service.
-type StatusInfo struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	StateText string `json:"stateText"`
-	IsAdmin   bool   `json:"isAdmin"`
-}
+var defaultMgr = NewManager(AgentConfig())
 
 // IsWindowsServiceProcess reports whether the current process is executing as a Windows Service.
 func IsWindowsServiceProcess() bool {
@@ -71,7 +65,10 @@ func IsAdmin() bool {
 }
 
 // QueryStatus checks whether TraffCountService is installed and running.
-func QueryStatus() StatusInfo {
+func QueryStatus() StatusInfo { return defaultMgr.QueryStatus() }
+
+// QueryStatus checks whether the configured service is installed and running.
+func (m *Manager) QueryStatus() StatusInfo {
 	info := StatusInfo{
 		Installed: false,
 		Running:   false,
@@ -86,7 +83,7 @@ func QueryStatus() StatusInfo {
 	}
 	defer windows.CloseServiceHandle(h)
 
-	svcNamePtr, _ := syscall.UTF16PtrFromString(ServiceName)
+	svcNamePtr, _ := syscall.UTF16PtrFromString(m.cfg.ServiceName)
 	sHandle, err := windows.OpenService(h, svcNamePtr, windows.SERVICE_QUERY_STATUS)
 	if err != nil {
 		return info
@@ -168,14 +165,16 @@ func RunElevated(args ...string) error {
 	}
 	if sei.HProcess != 0 {
 		defer windows.CloseHandle(sei.HProcess)
-		// Wait briefly (up to 3s) for non-interactive completion
 		_, _ = windows.WaitForSingleObject(sei.HProcess, 3000)
 	}
 	return nil
 }
 
 // InstallAndStart installs TraffCountService and starts it (requires Administrator privileges).
-func InstallAndStart() error {
+func InstallAndStart() error { return defaultMgr.InstallAndStart() }
+
+// InstallAndStart installs the configured Windows service and starts it.
+func (m *Manager) InstallAndStart() error {
 	if !IsAdmin() {
 		return RunElevated("service", "install")
 	}
@@ -189,29 +188,27 @@ func InstallAndStart() error {
 		return err
 	}
 
-	m, err := mgr.Connect()
+	cm, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect SCM: %w", err)
 	}
-	defer m.Disconnect()
+	defer cm.Disconnect()
 
-	// Ask any running TraffCount tray instance to release its in-process HTTP server on port 9876
-	_ = requestGracefulShutdown()
+	_ = m.requestGracefulShutdown()
 
-	s, err := m.OpenService(ServiceName)
+	s, err := cm.OpenService(m.cfg.ServiceName)
 	if err == nil {
-		// Already installed; make sure it's started
 		defer s.Close()
 		_ = s.Start()
 		return nil
 	}
 
-	s, err = m.CreateService(
-		ServiceName,
+	s, err = cm.CreateService(
+		m.cfg.ServiceName,
 		exePath,
 		mgr.Config{
-			DisplayName: ServiceDisplayName,
-			Description: ServiceDescription,
+			DisplayName: m.cfg.DisplayName,
+			Description: m.cfg.Description,
 			StartType:   mgr.StartAutomatic,
 		},
 		"service", "run",
@@ -221,7 +218,7 @@ func InstallAndStart() error {
 	}
 	defer s.Close()
 
-	_ = eventlog.InstallAsEventCreate(ServiceName, eventlog.Error|eventlog.Warning|eventlog.Info)
+	_ = eventlog.InstallAsEventCreate(m.cfg.ServiceName, eventlog.Error|eventlog.Warning|eventlog.Info)
 
 	if err := s.Start(); err != nil {
 		return fmt.Errorf("start service: %w", err)
@@ -230,20 +227,23 @@ func InstallAndStart() error {
 }
 
 // StopAndUninstall stops and removes TraffCountService (requires Administrator privileges).
-func StopAndUninstall() error {
+func StopAndUninstall() error { return defaultMgr.StopAndUninstall() }
+
+// StopAndUninstall stops and removes the configured Windows service.
+func (m *Manager) StopAndUninstall() error {
 	if !IsAdmin() {
 		return RunElevated("service", "uninstall")
 	}
 
-	m, err := mgr.Connect()
+	cm, err := mgr.Connect()
 	if err != nil {
 		return fmt.Errorf("connect SCM: %w", err)
 	}
-	defer m.Disconnect()
+	defer cm.Disconnect()
 
-	s, err := m.OpenService(ServiceName)
+	s, err := cm.OpenService(m.cfg.ServiceName)
 	if err != nil {
-		return fmt.Errorf("service %s is not installed", ServiceName)
+		return fmt.Errorf("service %s is not installed", m.cfg.ServiceName)
 	}
 	defer s.Close()
 
@@ -262,22 +262,25 @@ func StopAndUninstall() error {
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("delete service: %w", err)
 	}
-	_ = eventlog.Remove(ServiceName)
+	_ = eventlog.Remove(m.cfg.ServiceName)
 	return nil
 }
 
 // StartService starts an already-installed TraffCountService.
-func StartService() error {
+func StartService() error { return defaultMgr.StartService() }
+
+// StartService starts the already-installed configured service.
+func (m *Manager) StartService() error {
 	if !IsAdmin() {
 		return RunElevated("service", "start")
 	}
-	_ = requestGracefulShutdown()
-	m, err := mgr.Connect()
+	_ = m.requestGracefulShutdown()
+	cm, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(ServiceName)
+	defer cm.Disconnect()
+	s, err := cm.OpenService(m.cfg.ServiceName)
 	if err != nil {
 		return err
 	}
@@ -286,16 +289,19 @@ func StartService() error {
 }
 
 // StopService stops a running TraffCountService and waits until it reaches Stopped state.
-func StopService() error {
+func StopService() error { return defaultMgr.StopService() }
+
+// StopService stops the running configured service and waits until it reaches Stopped state.
+func (m *Manager) StopService() error {
 	if !IsAdmin() {
 		return RunElevated("service", "stop")
 	}
-	m, err := mgr.Connect()
+	cm, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(ServiceName)
+	defer cm.Disconnect()
+	s, err := cm.OpenService(m.cfg.ServiceName)
 	if err != nil {
 		return err
 	}
@@ -315,25 +321,25 @@ func StopService() error {
 	return nil
 }
 
-func requestGracefulShutdown() error {
-	// Ask any running TraffCount tray instance to release its in-process HTTP server on port 9876
-	// (WITHOUT closing the system tray icon itself!) so TraffCountService can bind port 9876 cleanly.
-	client := &http.Client{Timeout: 400 * time.Millisecond}
-	if resp, err := client.Post("http://127.0.0.1:9876/api/server/release", "application/json", nil); err == nil {
-		resp.Body.Close()
+func (m *Manager) requestGracefulShutdown() error {
+	if m.cfg.ReleaseURL != "" {
+		client := &http.Client{Timeout: 400 * time.Millisecond}
+		if resp, err := client.Post(m.cfg.ReleaseURL, "application/json", nil); err == nil {
+			resp.Body.Close()
+		}
 	}
 
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	procFindWindowW := user32.NewProc("FindWindowW")
-	procPostMessageW := user32.NewProc("PostMessageW")
-	className, _ := syscall.UTF16PtrFromString("TraffCountTrayWindowClass")
-	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
-	if hwnd != 0 {
-		const WM_RELEASE_SERVER = 0x0400 + 28
-		procPostMessageW.Call(hwnd, WM_RELEASE_SERVER, 0, 0)
+	if m.cfg.TrayWindowCls != "" {
+		user32 := windows.NewLazySystemDLL("user32.dll")
+		procFindWindowW := user32.NewProc("FindWindowW")
+		procPostMessageW := user32.NewProc("PostMessageW")
+		className, _ := syscall.UTF16PtrFromString(m.cfg.TrayWindowCls)
+		hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), 0)
+		if hwnd != 0 {
+			const WM_RELEASE_SERVER = 0x0400 + 28
+			procPostMessageW.Call(hwnd, WM_RELEASE_SERVER, 0, 0)
+		}
 	}
 	time.Sleep(400 * time.Millisecond)
 	return nil
 }
-
-

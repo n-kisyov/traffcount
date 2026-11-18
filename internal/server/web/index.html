@@ -596,6 +596,29 @@
               <strong>CLI Tip:</strong> You can also manage the service from an elevated PowerShell prompt using:
               <code>traffcount.exe service install</code> or <code>traffcount.exe service status</code>
             </div>
+
+            <div class="setting-row win-only" style="margin-top:8px;padding-top:12px;border-top:1px solid var(--border-color)">
+              <div>
+                <div class="setting-title">Allow Remote Sync Server Polling (LAN)</div>
+                <div class="setting-hint">Bind <code>0.0.0.0:9876</code> instead of localhost-only so TraffCount Sync Server can poll this host. Restart daemon/service after toggling.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkAllowRemoteSync" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row setting-row-col">
+              <div>
+                <div class="setting-title">Remote Sync API Token (Optional)</div>
+                <div class="setting-hint">Require a Bearer token for non-localhost polling requests to <code>/api/*</code> and <code>/ws</code>. Leave blank for open LAN polling.</div>
+              </div>
+              <div class="ping-add-row">
+                <input type="text" id="inputSyncApiToken" class="input-control" placeholder="Optional secret token (blank = open LAN)" style="flex:1;font-family:var(--font-mono)" />
+                <button id="btnGenSyncToken" type="button" class="btn-secondary btn-sm">Generate</button>
+                <button id="btnSaveSyncToken" type="button" class="btn-primary btn-sm">Apply</button>
+              </div>
+            </div>
           </div>
 
           <div class="settings-card">

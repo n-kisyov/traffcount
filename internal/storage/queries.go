@@ -765,3 +765,114 @@ func (s *Store) PruneOldData(retentionDays int) error {
 	return err
 }
 
+// SyncTrafficRow represents a raw per-interface hourly bucket for lossless remote sync.
+type SyncTrafficRow struct {
+	IfaceID  string `json:"ifaceId"`
+	BucketTS int64  `json:"bucketTs"`
+	RxBytes  uint64 `json:"rxBytes"`
+	TxBytes  uint64 `json:"txBytes"`
+}
+
+// SyncProcessRow represents a raw per-application hourly bucket for lossless remote sync.
+type SyncProcessRow struct {
+	ProcessName string `json:"processName"`
+	ExePath     string `json:"exePath"`
+	BucketTS    int64  `json:"bucketTs"`
+	RxBytes     uint64 `json:"rxBytes"`
+	TxBytes     uint64 `json:"txBytes"`
+	Blocked     bool   `json:"blocked"`
+}
+
+// SyncExportPayload contains raw hourly rollups, interfaces, and speed tests since a timestamp.
+type SyncExportPayload struct {
+	SinceTS    int64             `json:"sinceTs"`
+	ServerTS   int64             `json:"serverTs"`
+	Interfaces []InterfaceRecord `json:"interfaces"`
+	Traffic    []SyncTrafficRow  `json:"traffic"`
+	Processes  []SyncProcessRow  `json:"processes"`
+	SpeedTests []SpeedTestRecord `json:"speedTests"`
+}
+
+// ExportSyncSnapshot exports raw hourly interface/app rollups and speed tests for TraffCount Sync Server.
+func (s *Store) ExportSyncSnapshot(sinceTS int64) (SyncExportPayload, error) {
+	out := SyncExportPayload{
+		SinceTS:    sinceTS,
+		ServerTS:   time.Now().Unix(),
+		Interfaces: make([]InterfaceRecord, 0),
+		Traffic:    make([]SyncTrafficRow, 0),
+		Processes:  make([]SyncProcessRow, 0),
+		SpeedTests: make([]SpeedTestRecord, 0),
+	}
+
+	ifaces, err := s.ListInterfaces()
+	if err != nil {
+		return out, err
+	}
+	out.Interfaces = ifaces
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tRows, err := s.db.Query(`
+		SELECT iface_id, bucket_ts, rx_bytes, tx_bytes
+		FROM traffic_hourly
+		WHERE bucket_ts >= ?
+		ORDER BY bucket_ts ASC
+	`, sinceTS)
+	if err != nil {
+		return out, err
+	}
+	for tRows.Next() {
+		var r SyncTrafficRow
+		if err := tRows.Scan(&r.IfaceID, &r.BucketTS, &r.RxBytes, &r.TxBytes); err == nil {
+			out.Traffic = append(out.Traffic, r)
+		}
+	}
+	_ = tRows.Close()
+
+	pRows, err := s.db.Query(`
+		SELECT p.process_name,
+		       COALESCE(NULLIF(MAX(k.exe_path), ''), MAX(p.exe_path), '') AS exe_path,
+		       p.bucket_ts,
+		       p.rx_bytes,
+		       p.tx_bytes,
+		       COALESCE(MAX(k.blocked), 0) AS blocked
+		FROM process_traffic_hourly p
+		LEFT JOIN known_apps k ON LOWER(k.process_name) = LOWER(p.process_name)
+		WHERE p.bucket_ts >= ?
+		GROUP BY p.process_name, p.bucket_ts
+		ORDER BY p.bucket_ts ASC
+	`, sinceTS)
+	if err != nil {
+		return out, err
+	}
+	for pRows.Next() {
+		var r SyncProcessRow
+		var blk int
+		if err := pRows.Scan(&r.ProcessName, &r.ExePath, &r.BucketTS, &r.RxBytes, &r.TxBytes, &blk); err == nil {
+			r.Blocked = blk != 0
+			out.Processes = append(out.Processes, r)
+		}
+	}
+	_ = pRows.Close()
+
+	stRows, err := s.db.Query(`
+		SELECT id, ts, unloaded_ping_ms, jitter_ms, loaded_ping_ms, download_mbps, upload_mbps, bufferbloat_grade, server_label, error
+		FROM speed_tests
+		WHERE ts >= ?
+		ORDER BY ts DESC
+		LIMIT 200
+	`, sinceTS)
+	if err == nil {
+		for stRows.Next() {
+			var r SpeedTestRecord
+			if err := stRows.Scan(&r.ID, &r.Timestamp, &r.UnloadedPingMs, &r.JitterMs, &r.LoadedPingMs, &r.DownloadMbps, &r.UploadMbps, &r.BufferbloatGrade, &r.ServerLabel, &r.Error); err == nil {
+				out.SpeedTests = append(out.SpeedTests, r)
+			}
+		}
+		_ = stRows.Close()
+	}
+
+	return out, nil
+}
+

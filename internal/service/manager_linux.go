@@ -20,15 +20,10 @@ const (
 	ServiceDescription = "Collects real-time and historical network interface traffic statistics for TraffCount on Raspberry Pi OS / Linux."
 )
 
-// StatusInfo represents the current state of the TraffCount systemd service.
-type StatusInfo struct {
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	StateText string `json:"stateText"`
-	IsAdmin   bool   `json:"isAdmin"`
-}
-
-var runningAsService atomic.Bool
+var (
+	runningAsService atomic.Bool
+	defaultMgr       = NewManager(AgentConfig())
+)
 
 // SetServiceProcessMode marks whether the current process was started via `service run`.
 func SetServiceProcessMode(v bool) {
@@ -50,8 +45,19 @@ func IsAdmin() bool {
 	return os.Geteuid() == 0
 }
 
+func (m *Manager) unitName() string {
+	return m.cfg.UnitName + ".service"
+}
+
+func (m *Manager) unitFilePath() string {
+	return "/etc/systemd/system/" + m.unitName()
+}
+
 // QueryStatus checks whether traffcount.service is installed and running via systemd.
-func QueryStatus() StatusInfo {
+func QueryStatus() StatusInfo { return defaultMgr.QueryStatus() }
+
+// QueryStatus checks whether the configured systemd unit is installed and running.
+func (m *Manager) QueryStatus() StatusInfo {
 	info := StatusInfo{
 		Installed: false,
 		Running:   false,
@@ -59,11 +65,11 @@ func QueryStatus() StatusInfo {
 		IsAdmin:   IsAdmin(),
 	}
 
-	if _, err := os.Stat(UnitFilePath); err == nil {
+	if _, err := os.Stat(m.unitFilePath()); err == nil {
 		info.Installed = true
 	}
 
-	out, err := exec.Command("systemctl", "show", ServiceName+".service", "--property=LoadState,ActiveState").Output()
+	out, err := exec.Command("systemctl", "show", m.unitName(), "--property=LoadState,ActiveState").Output()
 	if err != nil {
 		if info.Installed {
 			info.StateText = "Stopped"
@@ -108,7 +114,6 @@ func runPrivilegedCmd(name string, args ...string) error {
 	if IsAdmin() {
 		cmd = exec.Command(name, args...)
 	} else {
-		// Try non-interactive sudo (e.g. passwordless sudoers on Raspberry Pi OS)
 		sudoArgs := append([]string{"-n", name}, args...)
 		cmd = exec.Command("sudo", sudoArgs...)
 	}
@@ -117,9 +122,9 @@ func runPrivilegedCmd(name string, args ...string) error {
 		msg := strings.TrimSpace(string(out))
 		if !IsAdmin() {
 			if msg != "" {
-				return fmt.Errorf("root privileges required (run with 'sudo traffcount service ...'): %s", msg)
+				return fmt.Errorf("root privileges required (run with 'sudo ...'): %s", msg)
 			}
-			return fmt.Errorf("root privileges required (run with 'sudo traffcount service ...')")
+			return fmt.Errorf("root privileges required (run with 'sudo ...')")
 		}
 		return fmt.Errorf("%s %s failed: %s", name, strings.Join(args, " "), msg)
 	}
@@ -127,7 +132,10 @@ func runPrivilegedCmd(name string, args ...string) error {
 }
 
 // InstallAndStart writes the systemd unit file and enables/starts traffcount.service.
-func InstallAndStart() error {
+func InstallAndStart() error { return defaultMgr.InstallAndStart() }
+
+// InstallAndStart writes the configured systemd unit file and enables/starts it.
+func (m *Manager) InstallAndStart() error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
@@ -150,54 +158,67 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-`, ServiceDisplayName, exePath)
+`, m.cfg.DisplayName, exePath)
 
+	unitPath := m.unitFilePath()
 	if IsAdmin() {
-		if err := os.WriteFile(UnitFilePath, []byte(unitContent), 0644); err != nil {
-			return fmt.Errorf("write %s: %w", UnitFilePath, err)
+		if err := os.WriteFile(unitPath, []byte(unitContent), 0644); err != nil {
+			return fmt.Errorf("write %s: %w", unitPath, err)
 		}
 	} else {
-		cmd := exec.Command("sudo", "-n", "tee", UnitFilePath)
+		cmd := exec.Command("sudo", "-n", "tee", unitPath)
 		cmd.Stdin = strings.NewReader(unitContent)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("root privileges required to install systemd unit (run 'sudo traffcount service install'): %s", strings.TrimSpace(string(out)))
+			return fmt.Errorf("root privileges required to install systemd unit: %s", strings.TrimSpace(string(out)))
 		}
 	}
 
-	_ = requestGracefulShutdown()
+	_ = m.requestGracefulShutdown()
 	if err := runPrivilegedCmd("systemctl", "daemon-reload"); err != nil {
 		return err
 	}
-	return runPrivilegedCmd("systemctl", "enable", "--now", ServiceName+".service")
+	return runPrivilegedCmd("systemctl", "enable", "--now", m.unitName())
 }
 
 // StopAndUninstall stops, disables, and removes traffcount.service.
-func StopAndUninstall() error {
-	_ = runPrivilegedCmd("systemctl", "disable", "--now", ServiceName+".service")
+func StopAndUninstall() error { return defaultMgr.StopAndUninstall() }
+
+// StopAndUninstall stops, disables, and removes the configured systemd unit.
+func (m *Manager) StopAndUninstall() error {
+	_ = runPrivilegedCmd("systemctl", "disable", "--now", m.unitName())
+	unitPath := m.unitFilePath()
 	if IsAdmin() {
-		_ = os.Remove(UnitFilePath)
-	} else if err := runPrivilegedCmd("rm", "-f", UnitFilePath); err != nil {
+		_ = os.Remove(unitPath)
+	} else if err := runPrivilegedCmd("rm", "-f", unitPath); err != nil {
 		return err
 	}
 	return runPrivilegedCmd("systemctl", "daemon-reload")
 }
 
-// StartService starts traffcount.service after asking any standalone CLI instance to release port 9876.
-func StartService() error {
-	_ = requestGracefulShutdown()
-	return runPrivilegedCmd("systemctl", "start", ServiceName+".service")
+// StartService starts traffcount.service after asking any standalone CLI instance to release its port.
+func StartService() error { return defaultMgr.StartService() }
+
+// StartService starts the configured systemd unit.
+func (m *Manager) StartService() error {
+	_ = m.requestGracefulShutdown()
+	return runPrivilegedCmd("systemctl", "start", m.unitName())
 }
 
 // StopService stops traffcount.service.
-func StopService() error {
-	return runPrivilegedCmd("systemctl", "stop", ServiceName+".service")
+func StopService() error { return defaultMgr.StopService() }
+
+// StopService stops the configured systemd unit.
+func (m *Manager) StopService() error {
+	return runPrivilegedCmd("systemctl", "stop", m.unitName())
 }
 
-func requestGracefulShutdown() error {
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	if resp, err := client.Post("http://127.0.0.1:9876/api/server/release", "application/json", nil); err == nil {
-		resp.Body.Close()
+func (m *Manager) requestGracefulShutdown() error {
+	if m.cfg.ReleaseURL != "" {
+		client := &http.Client{Timeout: 500 * time.Millisecond}
+		if resp, err := client.Post(m.cfg.ReleaseURL, "application/json", nil); err == nil {
+			resp.Body.Close()
+		}
 	}
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 	return nil
 }

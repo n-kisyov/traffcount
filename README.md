@@ -124,6 +124,24 @@ sudo traffcount service uninstall
 traffcount quit
 ```
 
+## TraffCount Sync Server (Multi-Host Central Aggregator)
+
+`traffcount-sync` is a standalone central server + web dashboard that polls multiple Windows 11 and Raspberry Pi TraffCount hosts on your LAN, reconciles hourly SQLite metrics losslessly, and visualizes fleet-wide and per-host traffic (`http://<sync-host>:9880`).
+
+### Build & Run on Windows 11
+
+```powershell
+.\build-sync.ps1
+.\traffcount-sync.exe                  # Foreground server on http://0.0.0.0:9880
+.\traffcount-sync.exe service install  # Install & start Windows Service (TraffCountSyncService)
+.\traffcount-sync.exe service status   # Check service state
+.\traffcount-sync.exe hosts list       # List registered remote hosts
+```
+
+### Polling Windows 11 Agents Remotely
+
+Raspberry Pi agents listen on `0.0.0.0:9876` by default. On Windows 11 agents (`traffcount.exe`), open **Settings & Service**, enable **Allow Remote Sync Server Polling (LAN)** (optionally setting a Bearer **Sync API Token**), and restart `TraffCountService` / the app so port `9876` listens on LAN.
+
 ### Capturing Screenshots
 
 To regenerate the documentation screenshots using headless Edge via the Chrome DevTools Protocol:

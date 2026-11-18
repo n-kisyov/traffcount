@@ -21,6 +21,8 @@
       pingGateway: true,
       pingTargets: [],
       compactMiniWidget: true,
+      allowRemoteSync: false,
+      syncApiToken: "",
     },
     miniMode: false,
     wasMaximizedBeforeMini: false,
@@ -180,6 +182,10 @@
   const dbActionStatus = document.getElementById("dbActionStatus");
   const svcStateText = document.getElementById("svcStateText");
   const svcBadge = document.getElementById("svcBadge");
+  const chkAllowRemoteSync = document.getElementById("chkAllowRemoteSync");
+  const inputSyncApiToken = document.getElementById("inputSyncApiToken");
+  const btnGenSyncToken = document.getElementById("btnGenSyncToken");
+  const btnSaveSyncToken = document.getElementById("btnSaveSyncToken");
 
   // Formatting Helpers
   function formatBytes(bytes) {
@@ -266,6 +272,10 @@
     if (inputBillingDay) inputBillingDay.value = state.settings.billingDay || 1;
     if (inputSpikeMbps) inputSpikeMbps.value = state.settings.spikeAlertMbps || 0;
     if (chkNewAppAlert) chkNewAppAlert.checked = !!state.settings.newAppAlertEnabled;
+    if (chkAllowRemoteSync) chkAllowRemoteSync.checked = !!state.settings.allowRemoteSync;
+    if (inputSyncApiToken && document.activeElement !== inputSyncApiToken) {
+      inputSyncApiToken.value = state.settings.syncApiToken || "";
+    }
     btnStayOnTop.classList.toggle("pinned", !!state.settings.alwaysOnTop);
 
     renderRealtimeView();
@@ -366,6 +376,33 @@
   if (chkPingGateway) {
     chkPingGateway.addEventListener("change", (e) => {
       saveSettings({ pingGateway: e.target.checked });
+    });
+  }
+
+  if (chkAllowRemoteSync) {
+    chkAllowRemoteSync.addEventListener("change", (e) => {
+      saveSettings({ allowRemoteSync: e.target.checked });
+    });
+  }
+
+  if (btnGenSyncToken) {
+    btnGenSyncToken.addEventListener("click", () => {
+      const bytes = new Uint8Array(18);
+      if (window.crypto && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+      }
+      const token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      if (inputSyncApiToken) inputSyncApiToken.value = token;
+      saveSettings({ syncApiToken: token });
+    });
+  }
+
+  if (btnSaveSyncToken) {
+    btnSaveSyncToken.addEventListener("click", () => {
+      const token = (inputSyncApiToken?.value || "").trim();
+      saveSettings({ syncApiToken: token });
     });
   }
 

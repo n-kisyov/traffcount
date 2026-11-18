@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TraffCount Sync Server — Multi-Host Network Monitor</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+  <link rel="stylesheet" href="/style.css?v=1" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="5" r="2.5"></circle>
+            <circle cx="5" cy="18" r="2.5"></circle>
+            <circle cx="19" cy="18" r="2.5"></circle>
+            <line x1="10.7" y1="7.2" x2="6.3" y2="15.8"></line>
+            <line x1="13.3" y1="7.2" x2="17.7" y2="15.8"></line>
+            <line x1="7.5" y1="18" x2="16.5" y2="18"></line>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">TraffCount Sync</span>
+          <span class="brand-subtitle" id="brandSubtitle">Multi-Host Central Server</span>
+        </div>
+      </div>
+
+      <nav class="nav-list">
+        <button class="nav-item active" data-tab="overview">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>
+          </svg>
+          <span>Fleet Overview</span>
+        </button>
+
+        <button class="nav-item" data-tab="explorer">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          <span>Host Explorer</span>
+        </button>
+
+        <button class="nav-item" data-tab="history">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+          <span>Fleet History</span>
+        </button>
+
+        <button class="nav-item" data-tab="settings">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          <span>Hosts &amp; Settings</span>
+        </button>
+      </nav>
+
+      <!-- Sidebar Remote Hosts Selector -->
+      <div class="sidebar-section-header">
+        <span class="sidebar-section-label">REMOTE HOSTS</span>
+        <button id="btnSidebarAddHost" class="sidebar-add-btn" title="Add Remote Host">+</button>
+      </div>
+      <div id="hostSidebarList" class="adapter-list">
+        <!-- Populated dynamically -->
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="ws-status" id="wsStatus">
+          <span class="status-dot online"></span>
+          <span id="wsStatusText">Live (1s)</span>
+        </div>
+        <span class="source-badge app" id="dataSourceBadge" title="Active Sync Server Runtime">Source: Server</span>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <header class="top-bar">
+        <div class="top-bar-title">
+          <h1 id="viewTitle">Fleet Real-Time Overview</h1>
+          <span id="viewSubtitle" class="subtitle-badge">All Remote Hosts</span>
+        </div>
+
+        <div class="top-bar-actions">
+          <button id="btnQuickAddHost" class="action-pill" title="Add a remote Windows 11 or Raspberry Pi TraffCount host">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>Add Host</span>
+          </button>
+
+          <button id="btnQuickTheme" class="action-pill" title="Cycle Color Theme">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle>
+              <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle>
+              <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle>
+              <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle>
+              <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"></path>
+            </svg>
+            <span id="quickThemeLabel">Win11 Dark</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- TAB 1: FLEET OVERVIEW -->
+      <section id="tab-overview" class="tab-panel active">
+        <div class="kpi-grid">
+          <div class="kpi-card rx-accent">
+            <div class="kpi-label">Fleet Download Speed</div>
+            <div class="kpi-value" id="fleetRxSpeed">0 bps</div>
+            <div class="kpi-sub">Today Rx: <span id="fleetTodayRx">0 B</span></div>
+          </div>
+
+          <div class="kpi-card tx-accent">
+            <div class="kpi-label">Fleet Upload Speed</div>
+            <div class="kpi-value" id="fleetTxSpeed">0 bps</div>
+            <div class="kpi-sub">Today Tx: <span id="fleetTodayTx">0 B</span></div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-label">Monitored Hosts</div>
+            <div class="kpi-value" id="fleetHostsCount">0 / 0</div>
+            <div class="kpi-sub">Online / Configured</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-label">Today Combined</div>
+            <div class="kpi-value" id="fleetTodayCombined">0 B</div>
+            <div class="kpi-sub">Across all synced hosts</div>
+          </div>
+        </div>
+
+        <!-- Aggregate 60s Live Throughput Chart -->
+        <div class="card chart-card">
+          <div class="card-header">
+            <div>
+              <h2 id="fleetChartTitle">Aggregate Live Throughput (60 Seconds)</h2>
+              <p class="card-sub" id="fleetChartSub">Streaming combined Rx / Tx bandwidth from all online remote hosts</p>
+            </div>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch rx"></i> Download (Rx)</span>
+              <span class="legend-item"><i class="swatch tx"></i> Upload (Tx)</span>
+              <span class="scale-badge" id="fleetScaleMax">Scale: Auto</span>
+            </div>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="fleetRealtimeCanvas"></canvas>
+            <div id="fleetTooltip" class="chart-tooltip hidden"></div>
+          </div>
+        </div>
+
+        <!-- Remote Host Cards Grid -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Connected Hosts Telemetry</h2>
+              <p class="card-sub">Live throughput, platform runtime, collector mode, and health across your fleet</p>
+            </div>
+            <button id="btnAddHostEmpty" class="btn-primary btn-sm">+ Add Remote Host</button>
+          </div>
+          <div id="hostOverviewGrid" class="host-grid">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: HOST EXPLORER -->
+      <section id="tab-explorer" class="tab-panel">
+        <div class="card filter-card">
+          <div class="filter-row">
+            <label class="inline-label" for="explorerHostSelect">Target Host:</label>
+            <select id="explorerHostSelect" class="select-control" style="min-width:220px"></select>
+            <button id="btnExplorerSync" class="btn-secondary btn-sm">Sync History Now</button>
+            <button id="btnExplorerSpeedTest" class="btn-primary btn-sm">Run Remote Speedtest</button>
+            <span id="explorerHostMeta" class="subtitle-badge" style="margin-left:auto">No host selected</span>
+          </div>
+        </div>
+
+        <!-- Quota banner if agent has Data Cap enabled -->
+        <div class="card quota-card hidden" id="explorerQuotaBanner">
+          <div class="quota-top">
+            <div>
+              <span class="quota-title">Host Monthly Data Cap</span>
+              <span class="quota-sub" id="explorerQuotaCycle">—</span>
+            </div>
+            <div class="quota-numbers" id="explorerQuotaNumbers">0 GB / 0 GB</div>
+          </div>
+          <div class="quota-bar-track">
+            <div class="quota-bar-fill" id="explorerQuotaFill" style="width:0%"></div>
+          </div>
+          <div class="quota-projection" id="explorerQuotaProjection"></div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card rx-accent">
+            <div class="kpi-label">Host Download</div>
+            <div class="kpi-value" id="expRxSpeed">0 bps</div>
+            <div class="kpi-sub">Session Rx: <span id="expSessRx">0 B</span></div>
+          </div>
+          <div class="kpi-card tx-accent">
+            <div class="kpi-label">Host Upload</div>
+            <div class="kpi-value" id="expTxSpeed">0 bps</div>
+            <div class="kpi-sub">Session Tx: <span id="expSessTx">0 B</span></div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Agent Poll Latency</div>
+            <div class="kpi-value" id="expPollLatency">—</div>
+            <div class="kpi-sub">Collection Mode: <span id="expSourceMode">—</span></div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Active Adapters</div>
+            <div class="kpi-value" id="expNicCount">0</div>
+            <div class="kpi-sub">Primary: <span id="expPrimaryNic">—</span></div>
+          </div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-header">
+            <div>
+              <h2>Host Real-Time Bandwidth (60 Seconds)</h2>
+              <p class="card-sub" id="expChartSub">Live Rx / Tx sampled from remote TraffCount host</p>
+            </div>
+            <div class="ping-strip" id="expPingBadges"></div>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="explorerCanvas"></canvas>
+            <div id="explorerTooltip" class="chart-tooltip hidden"></div>
+          </div>
+        </div>
+
+        <!-- Remote Live Processes / Connections + Speed Tests -->
+        <div class="breakdown-grid">
+          <div class="card table-card">
+            <div class="card-header">
+              <div>
+                <h3>Live Connections &amp; Processes (Proxied)</h3>
+                <p class="card-sub">Queried directly from the selected host agent</p>
+              </div>
+              <button id="btnRefreshExpConns" class="btn-secondary btn-sm">Refresh</button>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Application</th>
+                    <th>PID</th>
+                    <th>Estab</th>
+                    <th class="num">Download</th>
+                    <th class="num">Upload</th>
+                    <th class="num">Total</th>
+                  </tr>
+                </thead>
+                <tbody id="expProcTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card table-card">
+            <div class="card-header">
+              <div>
+                <h3>Speed Test &amp; Bufferbloat History</h3>
+                <p class="card-sub" id="expSpeedTestStatus">Synced tests for this host</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Date / Time</th>
+                    <th class="num">Down</th>
+                    <th class="num">Up</th>
+                    <th class="num">Ping</th>
+                    <th>Grade</th>
+                  </tr>
+                </thead>
+                <tbody id="expSpeedTestBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: FLEET HISTORY -->
+      <section id="tab-history" class="tab-panel">
+        <div class="card filter-card">
+          <div class="filter-row">
+            <div class="range-pills" id="historyRangePills">
+              <button class="pill" data-range="today">Today</button>
+              <button class="pill" data-range="24h">Last 24h</button>
+              <button class="pill" data-range="7d">7 Days</button>
+              <button class="pill active" data-range="14d">14 Days</button>
+              <button class="pill" data-range="30d">30 Days</button>
+              <button class="pill" data-range="90d">90 Days</button>
+              <button class="pill" data-range="custom">Custom</button>
+            </div>
+
+            <div class="history-selects">
+              <select id="histHostFilter" class="select-control">
+                <option value="all">All Remote Hosts</option>
+              </select>
+
+              <button id="btnExportCSV" class="btn-secondary btn-sm">Export CSV</button>
+              <button id="btnExportJSON" class="btn-secondary btn-sm">Export JSON</button>
+            </div>
+          </div>
+
+          <div class="custom-date-row hidden" id="customDateRow">
+            <label>From <input type="date" id="inputStartDate" class="input-control" /></label>
+            <label>To <input type="date" id="inputEndDate" class="input-control" /></label>
+            <button id="btnApplyCustomRange" class="btn-primary btn-sm">Apply Range</button>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card rx-accent">
+            <div class="kpi-label">Period Download (Rx)</div>
+            <div class="kpi-value" id="histTotalRx">0 B</div>
+            <div class="kpi-sub">Total inbound across selection</div>
+          </div>
+          <div class="kpi-card tx-accent">
+            <div class="kpi-label">Period Upload (Tx)</div>
+            <div class="kpi-value" id="histTotalTx">0 B</div>
+            <div class="kpi-sub">Total outbound across selection</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Combined Fleet Volume</div>
+            <div class="kpi-value" id="histCombined">0 B</div>
+            <div class="kpi-sub">Rx + Tx aggregated total</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Daily Average</div>
+            <div class="kpi-value" id="histAvgDaily">0 B</div>
+            <div class="kpi-sub">Over selected window</div>
+          </div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="card-header">
+            <div>
+              <h2>Fleet Traffic Volume Breakdown</h2>
+              <p class="card-sub" id="histChartSub">Synced hourly &amp; daily totals from SQLite</p>
+            </div>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch rx"></i> Download (Rx)</span>
+              <span class="legend-item"><i class="swatch tx"></i> Upload (Tx)</span>
+            </div>
+          </div>
+          <div class="canvas-wrap history-canvas-wrap">
+            <canvas id="historyCanvas"></canvas>
+            <div id="histTooltip" class="chart-tooltip hidden"></div>
+          </div>
+        </div>
+
+        <div class="breakdown-grid">
+          <div class="card table-card">
+            <h3>Traffic Volume by Remote Host</h3>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Host</th>
+                    <th>OS</th>
+                    <th class="num">Download</th>
+                    <th class="num">Upload</th>
+                    <th class="num">Total</th>
+                    <th class="num">Share</th>
+                  </tr>
+                </thead>
+                <tbody id="histHostTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card table-card">
+            <h3>Top Applications Across Hosts</h3>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Host</th>
+                    <th>Application</th>
+                    <th class="num">Download</th>
+                    <th class="num">Upload</th>
+                    <th class="num">Total</th>
+                    <th class="num">Share</th>
+                  </tr>
+                </thead>
+                <tbody id="histProcTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: HOSTS & SETTINGS -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="settings-grid">
+          <!-- Remote Hosts Management (Full Width Card) -->
+          <div class="settings-card settings-span-2">
+            <div class="card-header">
+              <div>
+                <h3>Managed Remote Hosts</h3>
+                <p class="settings-desc">
+                  Register Windows 11 PCs or Raspberry Pi nodes running TraffCount (`traffcount.exe` or `traffcount`).
+                </p>
+              </div>
+              <button id="btnSettingsAddHost" class="btn-primary">+ Add Remote Host</button>
+            </div>
+
+            <div class="table-scroll" style="max-height:280px">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Endpoint URL</th>
+                    <th>OS / Runtime</th>
+                    <th>Status</th>
+                    <th>Poll Rate</th>
+                    <th>Last Sync</th>
+                    <th class="num">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="hostsManageTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Appearance & Sync Preferences -->
+          <div class="settings-card">
+            <h3>Appearance &amp; Polling Preferences</h3>
+            <p class="settings-desc">Customize display units, theme palette, and central poller cadence.</p>
+
+            <div class="setting-row setting-row-col">
+              <div>
+                <div class="setting-title">Color Theme</div>
+                <div class="setting-hint">Matches TraffCount Desktop themes across all charts and tables.</div>
+              </div>
+              <div class="segmented-control theme-segmented" id="themeSelector">
+                <button class="seg-btn active" data-theme-val="dark">Win11 Dark</button>
+                <button class="seg-btn" data-theme-val="antigravity">Antigravity IDE</button>
+                <button class="seg-btn" data-theme-val="nord">Nord</button>
+                <button class="seg-btn" data-theme-val="dracula">Dracula</button>
+                <button class="seg-btn" data-theme-val="emerald">Emerald</button>
+                <button class="seg-btn" data-theme-val="light">Light</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Bandwidth Speed Units</div>
+                <div class="setting-hint">Display real-time speeds in bits/sec (Mbps) or bytes/sec (MB/s).</div>
+              </div>
+              <div class="segmented-control" id="unitSelector">
+                <button class="seg-btn active" data-unit-val="bits">Bits (Mbps / Kbps)</button>
+                <button class="seg-btn" data-unit-val="bytes">Bytes (MB/s / KB/s)</button>
+              </div>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">Hide Software Loopback Adapters</div>
+                <div class="setting-hint">Exclude virtual loopback counters when summing remote host volumes.</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="chkHideLoopback" checked />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">History Reconciliation Interval (sec)</div>
+                <div class="setting-hint">How often SQLite hourly buckets are synced from remote hosts (15–3600s).</div>
+              </div>
+              <input type="number" id="inputHistorySyncSec" class="input-control" style="width:100px" min="15" max="3600" value="60" />
+            </div>
+
+            <div class="setting-row">
+              <div>
+                <div class="setting-title">History Retention Period</div>
+                <div class="setting-hint">Automatically prune fleet metrics older than the selected window.</div>
+              </div>
+              <select id="selectRetentionDays" class="select-control" style="min-width:140px">
+                <option value="30">30 Days</option>
+                <option value="90">90 Days</option>
+                <option value="365">365 Days (1 Year)</option>
+                <option value="-1">Unlimited</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Background Service & Fleet Database -->
+          <div class="settings-card">
+            <h3 id="svcCardTitle">Windows Sync Background Service</h3>
+            <p class="settings-desc" id="svcCardDesc">
+              Run TraffCount Sync Server as an automatic Windows Service (<code>TraffCountSyncService</code>) so multi-host polling runs 24/7 in the background.
+            </p>
+
+            <div class="service-status-banner">
+              <div>
+                <div class="setting-title">Service Status</div>
+                <div class="service-state-text" id="svcStateText">Checking...</div>
+              </div>
+              <span class="svc-badge" id="svcBadge">Checking</span>
+            </div>
+
+            <div class="service-actions">
+              <button id="btnSvcInstall" class="btn-primary">Install &amp; Start Service (Admin)</button>
+              <button id="btnSvcStart" class="btn-secondary">Start</button>
+              <button id="btnSvcStop" class="btn-secondary">Stop</button>
+              <button id="btnSvcUninstall" class="btn-danger">Uninstall Service</button>
+            </div>
+
+            <div class="settings-note" id="svcCliTip">
+              <strong>CLI Tip:</strong> Manage the service from PowerShell using:
+              <code>traffcount-sync.exe service install</code> or <code>traffcount-sync.exe service status</code>
+            </div>
+
+            <div class="service-actions" style="margin-top:8px;padding-top:12px;border-top:1px solid var(--border-color)">
+              <button id="btnBackupDB" class="btn-secondary">Download Fleet DB Backup (.db)</button>
+              <button id="btnResetDB" class="btn-danger">Reset Fleet History</button>
+            </div>
+            <div class="settings-note" id="dbActionStatus">
+              Database uses WAL mode with atomic <code>VACUUM INTO</code> online backups.
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Add / Edit Remote Host Modal -->
+  <div id="hostModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="card-header">
+        <h3 id="hostModalTitle">Add Remote TraffCount Host</h3>
+        <button id="btnCloseHostModal" class="ping-target-del" style="font-size:20px" title="Close">&times;</button>
+      </div>
+
+      <div class="modal-form">
+        <div class="form-field">
+          <label for="hostInputName">Display Name</label>
+          <input type="text" id="hostInputName" class="input-control" placeholder="e.g. Workstation-Win11 or Pi-Router" />
+        </div>
+
+        <div class="form-field">
+          <label for="hostInputURL">Host URL / IP:Port</label>
+          <input type="text" id="hostInputURL" class="input-control" placeholder="e.g. http://192.168.1.50:9876" />
+        </div>
+
+        <div class="form-field">
+          <label for="hostInputToken">API Token (Optional — matches host's Sync API Token)</label>
+          <input type="password" id="hostInputToken" class="input-control" placeholder="Leave blank if host has no API token" />
+        </div>
+
+        <div class="form-row-2">
+          <div class="form-field">
+            <label for="hostInputPollMs">Poll Interval (ms)</label>
+            <select id="hostInputPollMs" class="select-control">
+              <option value="1000">1000 ms (1 Hz Live)</option>
+              <option value="2000">2000 ms (2s)</option>
+              <option value="5000">5000 ms (5s Eco)</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="hostInputTags">Tags (Optional)</label>
+            <input type="text" id="hostInputTags" class="input-control" placeholder="e.g. office, desktop, rpi" />
+          </div>
+        </div>
+
+        <div class="setting-row" style="padding:4px 0">
+          <span class="setting-title">Enable Polling</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="hostInputEnabled" checked />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div id="hostTestResult" class="settings-note hidden"></div>
+
+        <div class="service-actions" style="justify-content:flex-end;margin-top:6px">
+          <button id="btnTestHostConn" type="button" class="btn-secondary">Test Connection</button>
+          <button id="btnSaveHostModal" type="button" class="btn-primary">Save Host</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=1"></script>
+</body>
+</html>

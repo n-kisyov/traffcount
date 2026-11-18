@@ -59,6 +59,11 @@ loop:
 
 // RunService executes runDaemon under the Windows Service Control Manager.
 func RunService(runDaemon func(ctx context.Context) error) error {
-	return svc.Run(ServiceName, &traffCountWinService{runDaemon: runDaemon})
+	return defaultMgr.RunService(runDaemon)
+}
+
+// RunService executes runDaemon under the Windows Service Control Manager for this Manager's service.
+func (m *Manager) RunService(runDaemon func(ctx context.Context) error) error {
+	return svc.Run(m.cfg.ServiceName, &traffCountWinService{runDaemon: runDaemon})
 }
 

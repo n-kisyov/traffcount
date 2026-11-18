@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/csv"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +36,7 @@ type Server struct {
 	collector    *collector.Collector
 	winMgr       *winui.Manager
 	miniMode     atomic.Bool
+	syncToken    atomic.Value
 	onTopChanged func(bool)
 	upgrader     websocket.Upgrader
 	httpSrv      *http.Server
@@ -50,6 +53,15 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+	}
+	if store != nil {
+		if cfg, err := store.GetSettings(); err == nil {
+			s.syncToken.Store(cfg.SyncApiToken)
+		} else {
+			s.syncToken.Store("")
+		}
+	} else {
+		s.syncToken.Store("")
 	}
 
 	mux := http.NewServeMux()
@@ -68,6 +80,7 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/api/history/export", s.handleHistoryExport)
+	mux.HandleFunc("/api/sync/export", s.handleSyncExport)
 	mux.HandleFunc("/api/quota", s.handleQuota)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/window/topmost", s.handleWindowTopmost)
@@ -86,10 +99,43 @@ func New(addr string, store *storage.Store, coll *collector.Collector, winMgr *w
 
 	s.httpSrv = &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           s.withSyncAuth(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	return s
+}
+
+func (s *Server) withSyncAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, _ := s.syncToken.Load().(string)
+		if token != "" && (strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/ws") {
+			if !isLoopbackRemote(r.RemoteAddr) {
+				provided := ""
+				authHdr := strings.TrimSpace(r.Header.Get("Authorization"))
+				if len(authHdr) > 7 && strings.EqualFold(authHdr[:7], "Bearer ") {
+					provided = strings.TrimSpace(authHdr[7:])
+				} else if hdrTok := strings.TrimSpace(r.Header.Get("X-TraffCount-Token")); hdrTok != "" {
+					provided = hdrTok
+				} else if qTok := strings.TrimSpace(r.URL.Query().Get("token")); qTok != "" {
+					provided = qTok
+				}
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: invalid or missing sync API token"})
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 // Start begins listening and serving until ctx is canceled.
@@ -143,12 +189,14 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	if service.IsServiceProcess() {
 		src = "service"
 	}
+	host, _ := os.Hostname()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
 		"app":      "traffcount",
 		"version":  "1.1.0",
 		"source":   src,
 		"platform": runtime.GOOS,
+		"hostname": host,
 	})
 }
 
@@ -166,6 +214,24 @@ func (s *Server) handleServerRelease(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(20 * time.Millisecond)
 		tray.NotifyTrayReleaseServer()
 	}()
+}
+
+func (s *Server) handleSyncExport(w http.ResponseWriter, r *http.Request) {
+	if s.collector != nil {
+		s.collector.FlushToDB()
+	}
+	var sinceTS int64
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v >= 0 {
+			sinceTS = v
+		}
+	}
+	payload, err := s.store.ExportSyncSnapshot(sinceTS)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleQuota(w http.ResponseWriter, r *http.Request) {
@@ -589,6 +655,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.syncToken.Store(strings.TrimSpace(cfg.SyncApiToken))
 		if cfg.RetentionDays > 0 {
 			go func(days int) { _ = s.store.PruneOldData(days) }(cfg.RetentionDays)
 		}

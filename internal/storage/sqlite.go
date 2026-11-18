@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,8 @@ type Settings struct {
 	PingGateway        bool               `json:"pingGateway"`        // Auto-probe Windows Default Gateway IP
 	PingTargets        []PingTargetConfig `json:"pingTargets"`        // Additional custom probe targets
 	CompactMiniWidget  bool               `json:"compactMiniWidget"`  // Show mini 60s sparkline inside mini-widget
+	AllowRemoteSync    bool               `json:"allowRemoteSync"`    // Bind 0.0.0.0:9876 on Windows so TraffCount Sync Server can poll remotely
+	SyncApiToken       string             `json:"syncApiToken"`       // Optional Bearer token required for non-loopback sync requests
 }
 
 // WindowBounds stores the last screen coordinates and size of the dashboard window.
@@ -265,6 +268,7 @@ func normalizeSettings(cfg Settings) Settings {
 	if len(cfg.PingTargets) > 8 {
 		cfg.PingTargets = cfg.PingTargets[:8]
 	}
+	cfg.SyncApiToken = strings.TrimSpace(cfg.SyncApiToken)
 	return cfg
 }
 
