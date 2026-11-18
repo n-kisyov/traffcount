@@ -108,6 +108,8 @@
 
       <!-- TAB 1: FLEET OVERVIEW -->
       <section id="tab-overview" class="tab-panel active">
+        <div id="fleetHealthBanner" class="health-banner hidden"></div>
+
         <div class="kpi-grid">
           <div class="kpi-card rx-accent">
             <div class="kpi-label">Fleet Download Speed</div>
@@ -237,14 +239,26 @@
           <div class="card table-card">
             <div class="card-header">
               <div>
-                <h3>Live Connections &amp; Processes (Proxied)</h3>
-                <p class="card-sub">Queried directly from the selected host agent</p>
+                <h3>Live Connections, Processes &amp; Firewall</h3>
+                <p class="card-sub">Queried and controlled remotely on the selected host agent</p>
               </div>
               <button id="btnRefreshExpConns" class="btn-secondary btn-sm">Refresh</button>
             </div>
+            <div class="exp-conn-toolbar">
+              <div class="segmented-control" id="expConnSubTabs">
+                <button class="seg-btn active" data-subtab="processes">Processes</button>
+                <button class="seg-btn" data-subtab="sockets">Active Sockets</button>
+                <button class="seg-btn" data-subtab="apps">Firewall / Apps</button>
+              </div>
+              <input type="text" id="expConnSearch" class="input-control" placeholder="Filter app or IP..." style="flex:1;min-width:120px" />
+              <label class="inline-check">
+                <input type="checkbox" id="chkExpIncludeUDP" />
+                <span>UDP</span>
+              </label>
+            </div>
             <div class="table-scroll">
               <table class="data-table">
-                <thead>
+                <thead id="expConnTableHead">
                   <tr>
                     <th>Application</th>
                     <th>PID</th>
@@ -252,6 +266,7 @@
                     <th class="num">Download</th>
                     <th class="num">Upload</th>
                     <th class="num">Total</th>
+                    <th class="num">Control</th>
                   </tr>
                 </thead>
                 <tbody id="expProcTableBody"></tbody>
@@ -580,9 +595,11 @@
           </label>
         </div>
 
+        <div id="lanDiscoveryResults" class="lan-discovery-list hidden"></div>
         <div id="hostTestResult" class="settings-note hidden"></div>
 
         <div class="service-actions" style="justify-content:flex-end;margin-top:6px">
+          <button id="btnScanLanHosts" type="button" class="btn-secondary">Scan LAN</button>
           <button id="btnTestHostConn" type="button" class="btn-secondary">Test Connection</button>
           <button id="btnSaveHostModal" type="button" class="btn-primary">Save Host</button>
         </div>

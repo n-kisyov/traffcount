@@ -41,6 +41,9 @@
     histHover: null,
     editingHostID: "",
     lastTodayFetchAt: 0,
+    expConnSubTab: "processes", // "processes", "sockets", "apps"
+    expConnSnap: null,
+    expKnownApps: [],
   };
 
   // Core DOM refs
@@ -64,6 +67,7 @@
   const fleetCanvas = document.getElementById("fleetRealtimeCanvas");
   const fleetTooltip = document.getElementById("fleetTooltip");
   const hostOverviewGrid = document.getElementById("hostOverviewGrid");
+  const fleetHealthBanner = document.getElementById("fleetHealthBanner");
 
   // Explorer DOM
   const explorerHostSelect = document.getElementById("explorerHostSelect");
@@ -84,7 +88,10 @@
   const expPingBadgesEl = document.getElementById("expPingBadges");
   const explorerCanvas = document.getElementById("explorerCanvas");
   const explorerTooltip = document.getElementById("explorerTooltip");
+  const expConnTableHead = document.getElementById("expConnTableHead");
   const expProcTableBody = document.getElementById("expProcTableBody");
+  const expConnSearch = document.getElementById("expConnSearch");
+  const chkExpIncludeUDP = document.getElementById("chkExpIncludeUDP");
   const expSpeedTestBody = document.getElementById("expSpeedTestBody");
   const expSpeedTestStatus = document.getElementById("expSpeedTestStatus");
 
@@ -398,7 +405,38 @@
       fleetScaleMaxEl.textContent = `Scale: ${formatRate(scaleCeiling)}`;
     }
 
+    renderFleetHealthBanner(hosts);
     renderHostCards(hosts);
+  }
+
+  function renderFleetHealthBanner(hosts) {
+    if (!fleetHealthBanner) return;
+    const alerts = [];
+    for (const snap of hosts) {
+      const h = snap.host;
+      if (h.enabled && h.status === "offline") {
+        alerts.push(`${h.name} is offline`);
+      } else if (h.enabled && h.status === "auth_error") {
+        alerts.push(`${h.name} failed token auth`);
+      }
+      if (snap.quota?.enabled) {
+        if (snap.quota.over100) {
+          alerts.push(`${h.name} exceeded 100% monthly cap`);
+        } else if (snap.quota.over80) {
+          alerts.push(`${h.name} at ${snap.quota.usedPct.toFixed(0)}% monthly cap`);
+        }
+      }
+    }
+    if (alerts.length === 0) {
+      fleetHealthBanner.classList.add("hidden");
+      fleetHealthBanner.innerHTML = "";
+      return;
+    }
+    fleetHealthBanner.classList.remove("hidden");
+    fleetHealthBanner.innerHTML = `
+      <div><strong>Fleet Alerts (${alerts.length}):</strong> ${escapeHtml(alerts.join(" · "))}</div>
+      <span class="svc-badge warn">Attention</span>
+    `;
   }
 
   function renderHostCards(hosts) {
@@ -426,6 +464,23 @@
           ? `${probes[0].latencyMs} ms`
           : (h.lastLatencyMs > 0 ? `API ${h.lastLatencyMs} ms` : "—");
 
+        let quotaHtml = "";
+        if (snap.quota && snap.quota.enabled && snap.quota.capGB > 0) {
+          const pct = Math.max(0, snap.quota.usedPct || 0);
+          const fillCls = snap.quota.over100 ? "over" : (snap.quota.over80 ? "warn" : "");
+          quotaHtml = `
+            <div class="host-card-quota">
+              <div style="display:flex;justify-content:space-between">
+                <span>Monthly Cap (${escapeHtml(formatBytes(snap.quota.usedBytes || 0))} / ${snap.quota.capGB.toFixed(0)} GB)</span>
+                <strong>${pct.toFixed(1)}%</strong>
+              </div>
+              <div class="host-card-quota-bar">
+                <div class="host-card-quota-fill ${fillCls}" style="width:${Math.min(100, pct)}%"></div>
+              </div>
+            </div>
+          `;
+        }
+
         return `
           <div class="host-card" data-open-explorer="${escapeHtml(h.id)}">
             <div class="host-card-top">
@@ -450,6 +505,7 @@
                 <div class="host-rate-val tx">${escapeHtml(formatRate(snap.totalTxBps || 0))}</div>
               </div>
             </div>
+            ${quotaHtml}
             <div class="host-card-foot">
               <span>Today: ${escapeHtml(formatBytes(td.rxBytes + td.txBytes))}</span>
               <span>RTT: ${escapeHtml(pingText)}</span>
@@ -676,7 +732,11 @@
     const id = state.explorerHostID;
     if (!id) return;
     fetchHostQuota(id);
-    fetchHostConnections(id);
+    if (state.expConnSubTab === "apps") {
+      fetchHostApps(id);
+    } else {
+      fetchHostConnections(id);
+    }
     fetchHostSpeedTests(id);
   }
 
@@ -692,11 +752,19 @@
         explorerQuotaBanner?.classList.add("hidden");
         return;
       }
+      const usedBytes = Number(q.usedBytes ?? q.usedTotal ?? (q.usedGB ? q.usedGB * 1073741824 : 0));
+      const usedGB = q.usedGB !== undefined ? Number(q.usedGB) : usedBytes / 1073741824;
+      const capGB = Number(q.capGB ?? q.capGb ?? 0);
+      const pctUsed = Number(q.usedPct ?? q.pctUsed ?? (capGB > 0 ? (usedGB / capGB) * 100 : 0));
+      const projBytes = Number(q.projectedTotalBytes ?? (q.projectedGB ? q.projectedGB * 1073741824 : 0));
+      const projGB = q.projectedGB !== undefined ? Number(q.projectedGB) : projBytes / 1073741824;
+      const projPct = Number(q.projectedPct ?? (capGB > 0 ? (projGB / capGB) * 100 : 0));
+
       explorerQuotaBanner?.classList.remove("hidden");
       explorerQuotaCycle.textContent = q.cycleLabel || "Current cycle";
-      explorerQuotaNumbers.textContent = `${q.usedGB.toFixed(2)} GB / ${q.capGB.toFixed(0)} GB (${q.pctUsed.toFixed(1)}%)`;
-      explorerQuotaFill.style.width = `${Math.min(100, q.pctUsed)}%`;
-      explorerQuotaProjection.textContent = `Projected end-of-cycle usage: ${q.projectedGB.toFixed(1)} GB (${q.projectedPct.toFixed(0)}%)`;
+      explorerQuotaNumbers.textContent = `${usedGB.toFixed(2)} GB / ${capGB.toFixed(0)} GB (${pctUsed.toFixed(1)}%)`;
+      explorerQuotaFill.style.width = `${Math.min(100, Math.max(0, pctUsed))}%`;
+      explorerQuotaProjection.textContent = `Projected end-of-cycle usage: ${projGB.toFixed(1)} GB (${projPct.toFixed(0)}%)`;
     } catch (_) {
       explorerQuotaBanner?.classList.add("hidden");
     }
@@ -705,33 +773,225 @@
   async function fetchHostConnections(id) {
     if (!expProcTableBody) return;
     try {
-      const res = await fetch(`/api/hosts/${encodeURIComponent(id)}/connections`);
+      const includeUDP = !!chkExpIncludeUDP?.checked;
+      const res = await fetch(`/api/hosts/${encodeURIComponent(id)}/connections?udp=${includeUDP}`);
       if (!res.ok) {
-        expProcTableBody.innerHTML = `<tr><td colspan="6" style="color:var(--text-muted)">Unable to reach remote agent</td></tr>`;
+        expProcTableBody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted)">Unable to reach remote agent</td></tr>`;
         return;
       }
-      const snap = await res.json();
-      const procs = snap.topProcesses || [];
+      state.expConnSnap = await res.json();
+      renderExplorerConnectionsTable();
+    } catch (_) {}
+  }
+
+  async function fetchHostApps(id) {
+    if (!expProcTableBody) return;
+    try {
+      const res = await fetch(`/api/hosts/${encodeURIComponent(id)}/apps`);
+      if (!res.ok) {
+        expProcTableBody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted)">Unable to load remote apps</td></tr>`;
+        return;
+      }
+      const data = await res.json();
+      state.expKnownApps = data.apps || [];
+      renderExplorerConnectionsTable();
+    } catch (_) {}
+  }
+
+  function renderExplorerConnectionsTable() {
+    if (!expProcTableBody || !expConnTableHead) return;
+    const hostID = state.explorerHostID;
+    const query = (expConnSearch?.value || "").trim().toLowerCase();
+
+    if (state.expConnSubTab === "apps") {
+      expConnTableHead.innerHTML = `
+        <tr>
+          <th>Application</th>
+          <th>Executable Path</th>
+          <th class="num">Download</th>
+          <th class="num">Upload</th>
+          <th>Status</th>
+          <th class="num">Firewall</th>
+        </tr>
+      `;
+      const apps = (state.expKnownApps || []).filter((a) =>
+        !query || a.processName?.toLowerCase().includes(query) || a.exePath?.toLowerCase().includes(query)
+      );
+      if (apps.length === 0) {
+        expProcTableBody.innerHTML = `<tr><td colspan="6" style="color:var(--text-muted)">No recorded applications match filter.</td></tr>`;
+        return;
+      }
+      expProcTableBody.innerHTML = apps
+        .slice(0, 40)
+        .map((a) => `
+          <tr>
+            <td><strong>${escapeHtml(a.processName)}</strong></td>
+            <td style="font-size:11px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.exePath || "—")}</td>
+            <td class="num">${escapeHtml(formatBytes(a.rxBytes || 0))}</td>
+            <td class="num">${escapeHtml(formatBytes(a.txBytes || 0))}</td>
+            <td><span class="svc-badge ${a.blocked ? "offline" : "online"}">${a.blocked ? "Blocked" : "Allowed"}</span></td>
+            <td class="num">
+              <button class="btn-sm ${a.blocked ? "btn-secondary" : "btn-danger"}" data-exp-fw="${escapeHtml(a.processName)}" data-exp-exe="${escapeHtml(a.exePath || "")}" data-exp-blk="${a.blocked ? "1" : "0"}">
+                ${a.blocked ? "Unblock" : "Block"}
+              </button>
+            </td>
+          </tr>
+        `)
+        .join("");
+    } else if (state.expConnSubTab === "sockets") {
+      expConnTableHead.innerHTML = `
+        <tr>
+          <th>Proto</th>
+          <th>Local</th>
+          <th>Remote</th>
+          <th class="num">RTT</th>
+          <th>App</th>
+          <th class="num">Action</th>
+        </tr>
+      `;
+      const conns = (state.expConnSnap?.connections || []).filter((c) =>
+        !query ||
+        c.processName?.toLowerCase().includes(query) ||
+        c.remoteAddr?.toLowerCase().includes(query) ||
+        c.remoteHost?.toLowerCase().includes(query)
+      );
+      if (conns.length === 0) {
+        expProcTableBody.innerHTML = `<tr><td colspan="6" style="color:var(--text-muted)">No active sockets match filter.</td></tr>`;
+        return;
+      }
+      expProcTableBody.innerHTML = conns
+        .slice(0, 45)
+        .map((c) => `
+          <tr>
+            <td><span class="platform-pill">${escapeHtml(c.protocol)}</span></td>
+            <td style="font-family:var(--font-mono);font-size:11px">${escapeHtml(c.localAddr)}</td>
+            <td style="font-family:var(--font-mono);font-size:11px" title="${escapeHtml(c.geoLabel || "")}">${escapeHtml(c.remoteHost || c.remoteAddr)}</td>
+            <td class="num">${c.rttMs ? `${c.rttMs}ms` : "—"}</td>
+            <td>${escapeHtml(c.processName)}</td>
+            <td class="num">
+              ${c.protocol === "TCP" && c.state === "ESTABLISHED"
+                ? `<button class="btn-danger btn-sm" data-exp-close='${escapeHtml(JSON.stringify({ localIP: c.localIP, localPort: c.localPort, remoteIP: c.remoteIP, remotePort: c.remotePort }))}'>Close</button>`
+                : `<span style="color:var(--text-muted);font-size:11px">${escapeHtml(c.state)}</span>`}
+            </td>
+          </tr>
+        `)
+        .join("");
+    } else {
+      expConnTableHead.innerHTML = `
+        <tr>
+          <th>Application</th>
+          <th>PID</th>
+          <th>Estab</th>
+          <th class="num">Download</th>
+          <th class="num">Upload</th>
+          <th class="num">Total</th>
+          <th class="num">Control</th>
+        </tr>
+      `;
+      const procs = (state.expConnSnap?.topProcesses || []).filter((p) =>
+        !query || p.processName?.toLowerCase().includes(query) || p.exePath?.toLowerCase().includes(query)
+      );
       if (procs.length === 0) {
-        expProcTableBody.innerHTML = `<tr><td colspan="6" style="color:var(--text-muted)">No active application sockets reported</td></tr>`;
+        expProcTableBody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted)">No active application sockets reported</td></tr>`;
         return;
       }
       expProcTableBody.innerHTML = procs
-        .slice(0, 25)
-        .map(
-          (p) => `
-        <tr>
-          <td><strong>${escapeHtml(p.processName)}</strong></td>
-          <td>${p.pid}</td>
-          <td>${p.established}</td>
-          <td class="num">${escapeHtml(formatRate(p.rxBps))}</td>
-          <td class="num">${escapeHtml(formatRate(p.txBps))}</td>
-          <td class="num">${escapeHtml(formatBytes((p.totalRx || 0) + (p.totalTx || 0)))}</td>
-        </tr>
-      `
-        )
+        .slice(0, 30)
+        .map((p) => `
+          <tr>
+            <td><strong title="${escapeHtml(p.exePath || p.processName)}">${escapeHtml(p.processName)}</strong></td>
+            <td>${p.pid}</td>
+            <td>${p.established}</td>
+            <td class="num">${escapeHtml(formatRate(p.rxBps))}</td>
+            <td class="num">${escapeHtml(formatRate(p.txBps))}</td>
+            <td class="num">${escapeHtml(formatBytes((p.totalRx || 0) + (p.totalTx || 0)))}</td>
+            <td class="num" style="white-space:nowrap">
+              <button class="btn-sm ${p.blocked ? "btn-secondary" : "btn-danger"}" data-exp-fw="${escapeHtml(p.processName)}" data-exp-exe="${escapeHtml(p.exePath || "")}" data-exp-blk="${p.blocked ? "1" : "0"}">
+                ${p.blocked ? "Unblock" : "Block"}
+              </button>
+              ${p.pid > 4 ? `<button class="btn-danger btn-sm" data-exp-kill="${p.pid}">Kill</button>` : ""}
+            </td>
+          </tr>
+        `)
         .join("");
-    } catch (_) {}
+    }
+
+    // Wire remote actions cleanly
+    expProcTableBody.querySelectorAll("button[data-exp-fw]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const res = await fetch(`/api/hosts/${encodeURIComponent(hostID)}/firewall/block`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              processName: btn.dataset.expFw,
+              exePath: btn.dataset.expExe,
+              blocked: btn.dataset.expBlk !== "1",
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert(err.error || "Remote firewall update failed.");
+          }
+          refreshExplorerExtras();
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
+    expProcTableBody.querySelectorAll("button[data-exp-kill]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const pid = parseInt(btn.dataset.expKill, 10);
+        if (!confirm(`Terminate PID ${pid} on remote host?`)) return;
+        const res = await fetch(`/api/hosts/${encodeURIComponent(hostID)}/connections/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "kill_process", pid }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert(err.error || "Failed to terminate remote process.");
+        }
+        fetchHostConnections(hostID);
+      });
+    });
+
+    expProcTableBody.querySelectorAll("button[data-exp-close]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const payload = JSON.parse(btn.dataset.expClose);
+        const res = await fetch(`/api/hosts/${encodeURIComponent(hostID)}/connections/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "close_socket", ...payload }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert(err.error || "Failed to close remote socket.");
+        }
+        fetchHostConnections(hostID);
+      });
+    });
+  }
+
+  document.querySelectorAll("#expConnSubTabs .seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#expConnSubTabs .seg-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.expConnSubTab = btn.dataset.subtab;
+      if (state.explorerHostID) {
+        if (state.expConnSubTab === "apps") fetchHostApps(state.explorerHostID);
+        else renderExplorerConnectionsTable();
+      }
+    });
+  });
+
+  if (expConnSearch) expConnSearch.addEventListener("input", renderExplorerConnectionsTable);
+  if (chkExpIncludeUDP) {
+    chkExpIncludeUDP.addEventListener("change", () => {
+      if (state.explorerHostID) fetchHostConnections(state.explorerHostID);
+    });
   }
 
   async function fetchHostSpeedTests(id) {
@@ -1107,11 +1367,67 @@
     hostInputTags.value = existingHost?.tags || "";
     hostInputEnabled.checked = existingHost ? !!existingHost.enabled : true;
     hostTestResult.classList.add("hidden");
+    const discEl = document.getElementById("lanDiscoveryResults");
+    if (discEl) {
+      discEl.classList.add("hidden");
+      discEl.innerHTML = "";
+    }
     hostModal.classList.remove("hidden");
   }
 
   function closeHostModal() {
     hostModal.classList.add("hidden");
+  }
+
+  const btnScanLanHosts = document.getElementById("btnScanLanHosts");
+  if (btnScanLanHosts) {
+    btnScanLanHosts.addEventListener("click", async () => {
+      const discEl = document.getElementById("lanDiscoveryResults");
+      if (!discEl) return;
+      btnScanLanHosts.disabled = true;
+      btnScanLanHosts.textContent = "Scanning LAN...";
+      discEl.classList.remove("hidden");
+      discEl.innerHTML = `<div style="font-size:12px;color:var(--text-secondary)">Scanning private IPv4 /24 subnets on port 9876...</div>`;
+      try {
+        const res = await fetch("/api/hosts/discover", { method: "POST" });
+        const data = await res.json();
+        const list = data.hosts || [];
+        if (list.length === 0) {
+          discEl.innerHTML = `<div style="font-size:12px;color:var(--text-muted)">No TraffCount agents responded on LAN port 9876. Ensure Allow Remote Sync Polling is enabled on target hosts.</div>`;
+          return;
+        }
+        discEl.innerHTML = list
+          .map(
+            (d) => `
+          <div class="lan-discovery-item">
+            <div>
+              <strong>${escapeHtml(d.hostname || d.baseUrl)}</strong>
+              <span class="platform-pill">${escapeHtml(formatPlatform(d.platform))}</span>
+              ${d.requiresAuth ? `<span class="svc-badge warn">Token Required</span>` : ""}
+              <div style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono)">${escapeHtml(d.baseUrl)} (${d.latencyMs} ms)</div>
+            </div>
+            <button type="button" class="btn-sm ${d.alreadyAdded ? "btn-secondary" : "btn-primary"}" data-pick-host="${escapeHtml(d.baseUrl)}" data-pick-name="${escapeHtml(d.hostname || "")}">
+              ${d.alreadyAdded ? "Added" : "Select"}
+            </button>
+          </div>
+        `
+          )
+          .join("");
+        discEl.querySelectorAll("button[data-pick-host]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            hostInputURL.value = btn.dataset.pickHost;
+            if (btn.dataset.pickName && !hostInputName.value.trim()) {
+              hostInputName.value = btn.dataset.pickName;
+            }
+          });
+        });
+      } catch (e) {
+        discEl.innerHTML = `<div style="font-size:12px;color:var(--danger)">LAN scan error: ${escapeHtml(e.message)}</div>`;
+      } finally {
+        btnScanLanHosts.disabled = false;
+        btnScanLanHosts.textContent = "Scan LAN";
+      }
+    });
   }
 
   ["btnSidebarAddHost", "btnQuickAddHost", "btnAddHostEmpty", "btnSettingsAddHost"].forEach((id) => {
